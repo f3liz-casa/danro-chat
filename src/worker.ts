@@ -17,6 +17,17 @@ export interface Env {
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
     const url = new URL(request.url);
+    if (url.pathname === "/" && request.method === "GET") {
+      return new Response(
+        `<!doctype html><meta charset="utf-8"><title>danro-talk</title>` +
+        `<style>body{margin:0;display:grid;place-items:center;min-height:100dvh;` +
+        `background:#f4f2ed;font-family:-apple-system,sans-serif;color:#2b2a26}` +
+        `p{font-size:14px;color:#6a6760;margin:8px 0 0}</style>` +
+        `<div><div style="font-size:48px">🪵</div>` +
+        `<p>hello. nothing to see here.</p></div>`,
+        { headers: { "Content-Type": "text/html; charset=utf-8" } },
+      );
+    }
     if (url.pathname === "/widget.js") {
       return new Response(chatWidgetJs, {
         headers: {
