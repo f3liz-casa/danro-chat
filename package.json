@@ -5,6 +5,7 @@
   "type": "module",
   "scripts": {
     "dev": "wrangler dev",
+    "predeploy": "npm run build:widget && node scripts/gen-widget-text.mjs",
     "deploy": "wrangler deploy",
     "typecheck": "tsc --noEmit && tsc -p widget/tsconfig.json --noEmit",
     "build:widget": "esbuild widget/chat-widget.ts --bundle --format=esm --outfile=widget/chat-widget.js",

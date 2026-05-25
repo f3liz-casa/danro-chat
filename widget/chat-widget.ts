@@ -311,10 +311,18 @@ class DanroTalk extends HTMLElement {
     const siteId = this.getAttribute("site-id");
     const target = this.getAttribute("target") ?? "zulip";
     this.storageKey = `${STORAGE_KEY_BASE}:${siteId ?? target}`;
-    const url = this.getAttribute("ws-url");
-    if (!url) {
-      this.textContent = this.strings.attrMissing;
-      return;
+    const explicitUrl = this.getAttribute("ws-url");
+    let url: string;
+    if (explicitUrl) {
+      url = explicitUrl;
+    } else {
+      const meta = new URL(import.meta.url);
+      if (meta.protocol === "https:" || meta.protocol === "http:") {
+        url = meta.origin.replace(/^https/, "wss").replace(/^http$/, "ws");
+      } else {
+        this.textContent = this.strings.attrMissing;
+        return;
+      }
     }
     this.render();
     this.connect(url);

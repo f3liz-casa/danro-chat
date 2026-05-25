@@ -46,13 +46,17 @@ export class ZulipAdapter {
       siteId: this.env.ZULIP_SITE_ID ?? "",
       origins: parseOrigins(this.env.ZULIP_ORIGINS ?? ""),
     };
+    if (!this.config.siteId) {
+      this.config.siteId = `zl_${nanoid(SITE_ID_LEN)}`;
+      await this.storage.put("zulip:config", this.config);
+    }
     this.queueId = (await this.storage.get<string>("zulip:queue_id")) ?? null;
     this.lastEventId = (await this.storage.get<number>("zulip:last_event_id")) ?? -1;
   }
 
   validate(siteId: string | undefined, origin: string | undefined): string | null {
     const sid = this.config.siteId;
-    if (sid && siteId !== sid) return "invalid_site_id";
+    if (siteId !== sid) return "invalid_site_id";
     const origs = this.config.origins;
     if (origs.length > 0) {
       if (!origin) return "origin_required";

@@ -10,25 +10,24 @@ up in your team chat as a topic / thread. Your team replies there, the
 visitor sees it in the widget. No third-party SaaS, no per-seat pricing.
 
 ```html
-<!-- Zulip-backed widget -->
-<danro-talk ws-url="wss://chat.example.org" lang="ja"></danro-talk>
+<!-- Zulip-backed widget (ws-url auto-detected when loaded from the same Worker) -->
+<script type="module" src="https://danro-api.atfedi.de/widget.js"></script>
+<danro-talk site-id="zl_xxxxxxxxxxxx" lang="ja"></danro-talk>
 
 <!-- Discord-backed widget -->
-<danro-talk ws-url="wss://chat.example.org" lang="ko"
-            target="discord" site-id="dc_xxxxxxxxxxxx"></danro-talk>
-
-<script type="module" src="https://cdn.example.org/chat-widget.js"></script>
+<danro-talk site-id="dc_xxxxxxxxxxxx" lang="ko" target="discord"></danro-talk>
 ```
 
 ## What's in the box
 
-- **Web Component widget** (vanilla, Shadow DOM, ~9KB minified) — embeds anywhere
-- **Bilingual UI** — `lang="ja"` / `lang="ko"`, with culturally adapted phrasing (not literal translation)
-- **Adapter abstraction** — `target="zulip"` or `target="discord"`, picked per-site
+- **Web Component widget** (vanilla, Shadow DOM, ~9 KB minified) — embeds anywhere
+- **Bilingual UI** — `lang="ja"` / `lang="ko"`, with culturally adapted phrasing
 - **Async-first UX** — encourages bundled questions, sets honest expectations about reply time
 - **Visitor identity** — nickname required at entry, optional email for future notifications
 - **Resume** — past conversation history loaded from the backing platform on reconnect
 - **Custom emoji** — Zulip realm emoji and Discord guild emoji render inline in the widget
+- **Topic naming** — `MM-DD [locale] nickname`; visitor ID posted as first message for traceability
+- **Topic rename** — rename from Zulip / Discord side; widget updates in real-time
 
 ## Why
 
@@ -38,65 +37,79 @@ that's a poor fit. You want visitor messages to land somewhere your team
 already hangs out (Zulip / Discord), and you want the widget to set
 expectations that replies take hours, not seconds. That's what this is.
 
-## Quick start (development)
+## Architecture
 
-```sh
-cp .env.example .env  # fill in ZULIP_* (and DISCORD_* if you want that adapter)
-npm install
-npm run dev           # starts WS server on :3000
-npm run build:widget  # bundles widget/chat-widget.js
-python3 -m http.server -d widget 8080   # serve widget/demo.html
-open http://localhost:8080/demo.html
+```
+widget (browser, Web Component)
+   ↓  WebSocket
+Cloudflare Worker → Durable Object (ChatServer)
+   ├── ZulipAdapter  — event-queue polling, DM bot commands
+   └── DiscordAdapter — Gateway WebSocket, slash commands, webhook send
+         ↓
+Zulip topic  /  Discord thread  (one per conversation)
 ```
 
-The demo shows side-by-side JP (→ Zulip) and KO (→ Discord) widgets.
+Conversations and config are persisted in Durable Object storage.
+The Discord Gateway connection is kept alive via a Durable Object Alarm
+chain (20-second interval).
 
-### Zulip setup
+## Deploy your own
 
-1. Create a Generic Bot in your Zulip realm; download its `zuliprc`
-2. Create a stream (the env default is `web-相談`); subscribe the bot
-3. Put `ZULIP_REALM` / `ZULIP_USERNAME` / `ZULIP_API_KEY` / `ZULIP_STREAM` into `.env`
-4. (Recommended) generate a siteId and lock down origins via env:
-   ```
-   ZULIP_SITE_ID=zu_yourchoice
-   ZULIP_ORIGINS=https://atfedi.de
-   ```
-   Embed with `<danro-talk site-id="zu_yourchoice" lang="ja">`. To rotate,
-   change the env value and restart.
+### Prerequisites
 
-Both fields are optional — if `ZULIP_SITE_ID` is unset, the server accepts
-any widget; if `ZULIP_ORIGINS` is unset, any origin is accepted. Set them
-in production.
+- Cloudflare account (free plan works)
+- Zulip bot credentials and/or Discord bot token
 
-### Discord setup
+### 1. Clone & install
 
-1. Create a Discord application + bot; **enable the MESSAGE CONTENT privileged intent**
-2. Invite the bot with scopes `bot applications.commands` and these
-   permissions (integer `326954454016`):
-   `View Channels`, `Send Messages`, `Send Messages in Threads`,
-   `Create Public Threads`, `Manage Threads`, `Read Message History`,
-   `Manage Webhooks`
-3. Put `DISCORD_BOT_TOKEN` into `.env`, start the server
-4. In Discord, run **`/danro set-channel #your-channel`** (admins only). The bot:
-   - auto-creates a webhook in that channel
-   - issues a **siteId** (e.g. `dc_V1StGXR8Z5jd`) — shown ephemerally to the admin
-   - prints the embed snippet to paste into your site
-5. Embed the widget with the issued siteId:
-   ```html
-   <danro-talk ws-url="wss://your-server"
-               target="discord"
-               site-id="dc_V1StGXR8Z5jd"
-               lang="ko"></danro-talk>
-   ```
-6. (Recommended) lock the siteId to your site's domain:
-   ```
-   /danro set-origin https://joinfediverse.kr
-   ```
+```sh
+git clone https://github.com/yourname/danro-talk
+cd danro-talk
+npm install
+```
 
-Visitor messages are posted via webhook with the visitor's nickname as the
-sender display name — in Discord they look like real users, not bot output.
+### 2. Configure Cloudflare
 
-#### Slash commands (require `Manage Server` permission by default)
+```sh
+# Zulip credentials (read from ~/.zuliprc)
+./scripts/set-secrets.sh
+
+# Discord bot token (optional)
+./scripts/set-discord-secret.sh
+```
+
+### 3. Deploy
+
+```sh
+npm run deploy
+```
+
+The worker is deployed to `your-worker.workers.dev`. To use a custom domain,
+add it to `wrangler.toml`:
+
+```toml
+[[routes]]
+pattern = "your-domain.example.com"
+custom_domain = true
+```
+
+### 4. Configure via bot DM (Zulip)
+
+Send DMs to your Zulip bot (admin only):
+
+| Command | What it does |
+|---|---|
+| `set-stream <name>` | Set the stream for visitor messages |
+| `show` | Display current config and siteId |
+| `set-origin <domains>` | Comma-separated origin allowlist; empty to clear |
+| `rotate-id` | Issue a new siteId; old widgets stop working |
+
+On first start the bot auto-generates a siteId. Run `show` to retrieve it.
+
+### 5. Configure via slash command (Discord)
+
+Run `/danro set-channel #your-channel` in your server (requires Manage Server).
+The bot responds with the siteId and embed snippet.
 
 | Command | What it does |
 |---|---|
@@ -106,67 +119,49 @@ sender display name — in Discord they look like real users, not bot output.
 | `/danro rotate-id` | Issue a new siteId; old widgets break, sessions close |
 | `/danro disable` | Remove configuration; active sessions close |
 
-#### Security model
+### 6. Embed the widget
 
-The siteId is **public** (it lives in your site's HTML) so think of it as a
+```html
+<script type="module" src="https://your-worker.workers.dev/widget.js"></script>
+
+<!-- Zulip -->
+<danro-talk site-id="zl_xxxxxxxxxxxx" lang="ja"></danro-talk>
+
+<!-- Discord -->
+<danro-talk site-id="dc_xxxxxxxxxxxx" lang="ko" target="discord"></danro-talk>
+```
+
+`ws-url` is optional — the widget auto-connects to the origin it was loaded from.
+
+## Local development
+
+```sh
+cp .env .dev.vars   # or: ln -s .env .dev.vars
+npm run dev         # wrangler dev on :8787
+npm run dev:widget  # rebuild widget on change
+open widget/demo.html
+```
+
+## Security model
+
+The siteId is **public** (it lives in your site's HTML), so think of it as a
 routing token, not a secret:
 
-1. **Origin allowlist** (strongest) — once you `/danro set-origin yoursite.com`,
-   the server checks the browser-supplied `Origin` header on every WS handshake.
-   Browsers can't fake `Origin`, so casual abuse — someone copying your siteId
-   and embedding the widget on their own site — is blocked entirely.
+1. **Origin allowlist** (strongest) — once set, the server checks the
+   browser-supplied `Origin` header on every WebSocket handshake. Browsers
+   can't forge `Origin`, blocking casual embedding abuse.
 2. **siteId** — filters out misconfigured clients and accidental embeds.
-3. **Rotate** — incident response. If you suspect abuse, rotate the siteId
-   and update your embed; old copies stop working immediately.
-4. **Disable** — kill switch; configuration deleted, active sessions closed.
-
-The remaining attack surface is "someone writes a custom non-browser client
-that forges the `Origin` header." That's not a defense any embedded widget
-can fully prevent without server-issued short-lived tokens — out of scope for
-Phase 1, but tractable later with rate limits and content-side controls.
-
-## Architecture
-
-```
-widget (browser, Web Component)
-   ↓  WebSocket (visitor identity, messages)
-server (Node + tsx)
-   ↓  Adapter ({zulip, discord}.send / fetchHistory / subscribe / emojis)
-Zulip topic  /  Discord thread (one per conversation)
-```
-
-Conversations are persisted in `data/conversations.json`. Topics are named
-`[ja] nickname (idHead)` so agents can see the visitor's language at a
-glance and identify the conversation by its short id.
-
-The adapter interface lives in [`src/adapter.ts`](src/adapter.ts). Adding a
-new platform means writing one file that implements `Adapter`.
-
-## Production: Cloudflare Workers + Durable Objects
-
-The node implementation is meant to be straightforward to port. The plan:
-
-- `src/zulip.ts` — replace `zulip-js` with a fetch-based mini-SDK (~150 lines);
-  long-poll loop runs inside a Durable Object
-- `src/discord.ts` — REST calls already use `fetch`; the Gateway WS portion
-  swaps to [`discord-gateway-cloudflare-do`](https://github.com/dcartertwo/discord-gateway-cloudflare-do)
-- `src/conversations.ts` — JSON-on-disk swaps to DO storage; one DO per conversation
-- `src/server.ts` — `ws` swaps to CF Worker WebSocket Hibernation
-- Email out: Resend / Postmark via fetch
-
-The adapter shape is the boundary. Nothing else in the server cares.
+3. **Rotate** — incident response: rotate the siteId and old copies stop
+   working immediately.
+4. **Disable** (Discord) — kill switch; configuration deleted, sessions closed.
 
 ## Roadmap
 
-- **Self-hosted Twemoji** — currently Unicode emoji SVGs come from jsDelivr.
-  Self-host them on the danro server (add a static HTTP endpoint, vendor
-  `@discordapp/twemoji`'s SVGs, point the widget at `${baseUrl}/twemoji/...`)
-  to remove the third-party CDN dependency.
 - **Email notification + resume tokens** — send the visitor a mail when an
-  agent replies, with a short-lived signed link to resume the session.
-- **Rate limiting / abuse controls** — per-IP throttling, agent-side `/danro
-  block <visitorId>`, and an audit log.
-- **Cloudflare Workers + Durable Objects port** — production target.
+  agent replies, with a signed link to resume the session.
+- **Rate limiting / abuse controls** — per-IP throttling, agent-side block
+  command, and an audit log.
+- **Self-hosted Twemoji** — remove the jsDelivr CDN dependency.
 
 ## License
 

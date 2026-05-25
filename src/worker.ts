@@ -1,4 +1,5 @@
 import { ChatServer } from "./chat-server.js";
+import { chatWidgetJs } from "./widget-text.js";
 export { ChatServer };
 
 export interface Env {
@@ -15,6 +16,16 @@ export interface Env {
 
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
+    const url = new URL(request.url);
+    if (url.pathname === "/widget.js") {
+      return new Response(chatWidgetJs, {
+        headers: {
+          "Content-Type": "application/javascript; charset=utf-8",
+          "Access-Control-Allow-Origin": "*",
+          "Cache-Control": "public, max-age=300",
+        },
+      });
+    }
     const id = env.CHAT_SERVER.idFromName("main");
     const stub = env.CHAT_SERVER.get(id);
     return stub.fetch(request);
