@@ -1,18 +1,15 @@
+import { existsSync, mkdirSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
+import { dirname } from "node:path";
 import { WebSocket as WSClient } from "ws";
 import type { Adapter, HistoryMessage, InboundMessage } from "./adapter.js";
 
 const BOT_TOKEN = process.env.DISCORD_BOT_TOKEN ?? "";
-const PARENT_CHANNEL_ID = process.env.DISCORD_PARENT_CHANNEL_ID ?? "";
-const WEBHOOK_URL = process.env.DISCORD_WEBHOOK_URL ?? "";
-const GUILD_ID = process.env.DISCORD_GUILD_ID ?? "";
+const CONFIG_PATH = process.env.DISCORD_CONFIG_PATH ?? "data/discord-config.json";
 
 const API = "https://discord.com/api/v10";
 const GATEWAY = "wss://gateway.discord.gg/?v=10&encoding=json";
 
-const threadByName = new Map<string, string>();
-const threadById = new Map<string, string>();
-let botUserId: string | null = null;
-
+type DiscordConfig = { guildId: string; channelId: string; webhookUrl: string };
 type DiscordMessage = {
   id: string;
   channel_id: string;
@@ -21,6 +18,33 @@ type DiscordMessage = {
   timestamp: string;
   webhook_id?: string;
 };
+
+let config: DiscordConfig | null = null;
+let botUserId: string | null = null;
+const threadByName = new Map<string, string>();
+const threadById = new Map<string, string>();
+
+function loadConfig(): void {
+  if (!existsSync(CONFIG_PATH)) return;
+  try {
+    config = JSON.parse(readFileSync(CONFIG_PATH, "utf8")) as DiscordConfig;
+  } catch (e) {
+    console.error("[discord:config] failed to load", e);
+  }
+}
+
+function saveConfig(): void {
+  if (!config) return;
+  mkdirSync(dirname(CONFIG_PATH), { recursive: true });
+  writeFileSync(CONFIG_PATH, JSON.stringify(config, null, 2));
+}
+
+function clearConfig(): void {
+  config = null;
+  threadByName.clear();
+  threadById.clear();
+  if (existsSync(CONFIG_PATH)) unlinkSync(CONFIG_PATH);
+}
 
 async function api(path: string, init: RequestInit = {}): Promise<Response> {
   return fetch(`${API}${path}`, {
@@ -34,21 +58,22 @@ async function api(path: string, init: RequestInit = {}): Promise<Response> {
 }
 
 async function loadActiveThreads(): Promise<void> {
-  if (!GUILD_ID) return;
-  const res = await api(`/guilds/${GUILD_ID}/threads/active`);
+  if (!config) return;
+  const res = await api(`/guilds/${config.guildId}/threads/active`);
   if (!res.ok) return;
   const data = (await res.json()) as { threads: Array<{ id: string; name: string; parent_id: string }> };
   for (const t of data.threads) {
-    if (t.parent_id !== PARENT_CHANNEL_ID) continue;
+    if (t.parent_id !== config.channelId) continue;
     threadByName.set(t.name, t.id);
     threadById.set(t.id, t.name);
   }
 }
 
 async function ensureThread(name: string): Promise<string> {
+  if (!config) throw new Error("discord not configured (run /danro set-channel)");
   const cached = threadByName.get(name);
   if (cached) return cached;
-  const res = await api(`/channels/${PARENT_CHANNEL_ID}/threads`, {
+  const res = await api(`/channels/${config.channelId}/threads`, {
     method: "POST",
     body: JSON.stringify({ name, type: 11, auto_archive_duration: 1440 }),
   });
@@ -57,6 +82,129 @@ async function ensureThread(name: string): Promise<string> {
   threadByName.set(name, thread.id);
   threadById.set(thread.id, name);
   return thread.id;
+}
+
+async function createWebhook(channelId: string): Promise<{ id: string; token: string; url: string }> {
+  const res = await api(`/channels/${channelId}/webhooks`, {
+    method: "POST",
+    body: JSON.stringify({ name: "danro-chat" }),
+  });
+  if (!res.ok) throw new Error(`webhook create failed: ${res.status} ${await res.text()}`);
+  const wh = (await res.json()) as { id: string; token: string };
+  return { ...wh, url: `https://discord.com/api/webhooks/${wh.id}/${wh.token}` };
+}
+
+async function respondInteraction(id: string, token: string, content: string): Promise<void> {
+  await fetch(`${API}/interactions/${id}/${token}/callback`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ type: 4, data: { content, flags: 64 } }),
+  });
+}
+
+type InteractionData = {
+  id: string;
+  token: string;
+  type: number;
+  guild_id?: string;
+  data?: {
+    name: string;
+    options?: Array<{
+      name: string;
+      type: number;
+      options?: Array<{ name: string; value: string }>;
+    }>;
+  };
+};
+
+async function handleInteraction(d: InteractionData): Promise<void> {
+  if (d.type !== 2 || d.data?.name !== "danro") return;
+  const sub = d.data.options?.[0];
+  if (!sub) return;
+
+  if (sub.name === "set-channel") {
+    const channelId = sub.options?.find((o) => o.name === "channel")?.value;
+    if (!channelId || !d.guild_id) {
+      await respondInteraction(d.id, d.token, "チャンネルを指定してください。");
+      return;
+    }
+    try {
+      const webhook = await createWebhook(channelId);
+      const wasConfigured = config !== null;
+      config = { guildId: d.guild_id, channelId, webhookUrl: webhook.url };
+      saveConfig();
+      threadByName.clear();
+      threadById.clear();
+      await loadActiveThreads();
+      await respondInteraction(
+        d.id,
+        d.token,
+        wasConfigured
+          ? `✅ <#${channelId}> に変更しました。`
+          : `✅ <#${channelId}> に設定しました。これ以降の訪問者メッセージはここのスレッドに届きます。`,
+      );
+    } catch (e) {
+      await respondInteraction(d.id, d.token, `❌ 失敗しました: ${e instanceof Error ? e.message : String(e)}`);
+    }
+    return;
+  }
+
+  if (sub.name === "show") {
+    if (config && config.guildId === d.guild_id) {
+      await respondInteraction(d.id, d.token, `現在のチャンネル: <#${config.channelId}>`);
+    } else {
+      await respondInteraction(d.id, d.token, "未設定です。`/danro set-channel` で設定してください。");
+    }
+    return;
+  }
+
+  if (sub.name === "disable") {
+    if (config && config.guildId === d.guild_id) {
+      clearConfig();
+      await respondInteraction(d.id, d.token, "✅ 無効化しました。");
+    } else {
+      await respondInteraction(d.id, d.token, "このサーバには設定がありません。");
+    }
+    return;
+  }
+}
+
+async function registerCommands(): Promise<void> {
+  if (!botUserId) return;
+  const commands = [
+    {
+      name: "danro",
+      description: "danro-chat configuration",
+      default_member_permissions: "32", // MANAGE_GUILD
+      options: [
+        {
+          name: "set-channel",
+          description: "Set the parent channel for visitor conversations",
+          type: 1,
+          options: [
+            {
+              name: "channel",
+              description: "Parent text channel",
+              type: 7,
+              required: true,
+              channel_types: [0],
+            },
+          ],
+        },
+        { name: "show", description: "Show current configuration", type: 1 },
+        { name: "disable", description: "Disable visitor chat in this server", type: 1 },
+      ],
+    },
+  ];
+  const res = await api(`/applications/${botUserId}/commands`, {
+    method: "PUT",
+    body: JSON.stringify(commands),
+  });
+  if (!res.ok) {
+    console.error("[discord:commands]", res.status, await res.text());
+  } else {
+    console.log("[discord] slash commands registered");
+  }
 }
 
 function connectGateway(onMessage: (m: DiscordMessage) => void): void {
@@ -69,7 +217,7 @@ function connectGateway(onMessage: (m: DiscordMessage) => void): void {
     heartbeat = null;
   };
 
-  ws.on("message", (raw) => {
+  ws.on("message", async (raw) => {
     const payload = JSON.parse(raw.toString()) as { op: number; d: any; s: number | null; t: string | null };
     if (payload.s !== null && payload.s !== undefined) seq = payload.s;
 
@@ -81,18 +229,25 @@ function connectGateway(onMessage: (m: DiscordMessage) => void): void {
         d: {
           token: BOT_TOKEN,
           intents,
-          properties: { os: "linux", browser: "danro-talk", device: "danro-talk" },
+          properties: { os: "linux", browser: "danro-chat", device: "danro-chat" },
         },
       }));
       return;
     }
 
     if (payload.op === 0) {
-      if (payload.t === "READY") botUserId = payload.d.user?.id ?? null;
+      if (payload.t === "READY") {
+        botUserId = payload.d.user?.id ?? null;
+        await registerCommands();
+        await loadActiveThreads();
+      }
       if (payload.t === "MESSAGE_CREATE") onMessage(payload.d as DiscordMessage);
+      if (payload.t === "INTERACTION_CREATE") {
+        handleInteraction(payload.d as InteractionData).catch((e) => console.error("[discord:interaction]", e));
+      }
       if (payload.t === "THREAD_CREATE") {
         const t = payload.d as { id: string; name: string; parent_id: string };
-        if (t.parent_id === PARENT_CHANNEL_ID) {
+        if (config && t.parent_id === config.channelId) {
           threadByName.set(t.name, t.id);
           threadById.set(t.id, t.name);
         }
@@ -115,13 +270,15 @@ function connectGateway(onMessage: (m: DiscordMessage) => void): void {
   });
 }
 
+loadConfig();
+
 export const discordAdapter: Adapter = {
   target: "discord",
 
   async send(topic, sender, text) {
-    if (!WEBHOOK_URL) throw new Error("DISCORD_WEBHOOK_URL not configured");
+    if (!config) throw new Error("discord not configured");
     const threadId = await ensureThread(topic);
-    const url = new URL(WEBHOOK_URL);
+    const url = new URL(config.webhookUrl);
     url.searchParams.set("thread_id", threadId);
     const res = await fetch(url.toString(), {
       method: "POST",
@@ -150,12 +307,12 @@ export const discordAdapter: Adapter = {
   },
 
   async subscribe(onMessage: (m: InboundMessage) => void): Promise<void> {
-    if (!BOT_TOKEN || !PARENT_CHANNEL_ID) {
-      console.warn("[discord] BOT_TOKEN or PARENT_CHANNEL_ID missing — skipping subscribe");
+    if (!BOT_TOKEN) {
+      console.warn("[discord] BOT_TOKEN missing — skipping subscribe");
       return;
     }
-    await loadActiveThreads();
     connectGateway((msg) => {
+      if (!config) return;
       if (msg.webhook_id) return;
       if (msg.author?.bot) return;
       if (botUserId && msg.author?.id === botUserId) return;
@@ -170,8 +327,8 @@ export const discordAdapter: Adapter = {
   },
 
   async emojis(): Promise<Record<string, string>> {
-    if (!GUILD_ID) return {};
-    const res = await api(`/guilds/${GUILD_ID}/emojis`);
+    if (!config) return {};
+    const res = await api(`/guilds/${config.guildId}/emojis`);
     if (!res.ok) return {};
     const data = (await res.json()) as Array<{ id: string; name: string; animated: boolean }>;
     const out: Record<string, string> = {};

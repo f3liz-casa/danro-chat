@@ -54,16 +54,23 @@ The demo shows side-by-side JP (→ Zulip) and KO (→ Discord) widgets.
 ### Discord setup
 
 1. Create a Discord application + bot; **enable the MESSAGE CONTENT privileged intent**
-2. Invite the bot to your guild with `Read Messages`, `Send Messages`,
-   `Create Public Threads`, `Send Messages in Threads`, `Manage Threads`,
-   `Read Message History`
-3. Create a parent text channel; create a webhook in it
-4. Fill `DISCORD_BOT_TOKEN`, `DISCORD_GUILD_ID`, `DISCORD_PARENT_CHANNEL_ID`,
-   `DISCORD_WEBHOOK_URL` in `.env`
+2. Invite the bot with scopes `bot applications.commands` and the following
+   permissions: `View Channels`, `Send Messages`, `Send Messages in Threads`,
+   `Create Public Threads`, `Manage Threads`, `Read Message History`,
+   `Manage Webhooks`
+3. Put `DISCORD_BOT_TOKEN` into `.env` and start the server
+4. In Discord, run `/danro set-channel #your-channel` (admins only) — the bot
+   will auto-create a webhook in that channel and persist the config
 
 Visitor messages are posted via webhook with the visitor's nickname as the
 sender's display name — so in Discord they look like real people, not bot
 output.
+
+Slash commands (require `Manage Server` permission by default):
+
+- `/danro set-channel <channel>` — pick the parent text channel
+- `/danro show` — show current configuration
+- `/danro disable` — remove configuration
 
 ## Architecture
 
