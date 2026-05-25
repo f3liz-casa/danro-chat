@@ -156,6 +156,18 @@ The node implementation is meant to be straightforward to port. The plan:
 
 The adapter shape is the boundary. Nothing else in the server cares.
 
+## Roadmap
+
+- **Self-hosted Twemoji** — currently Unicode emoji SVGs come from jsDelivr.
+  Self-host them on the danro server (add a static HTTP endpoint, vendor
+  `@discordapp/twemoji`'s SVGs, point the widget at `${baseUrl}/twemoji/...`)
+  to remove the third-party CDN dependency.
+- **Email notification + resume tokens** — send the visitor a mail when an
+  agent replies, with a short-lived signed link to resume the session.
+- **Rate limiting / abuse controls** — per-IP throttling, agent-side `/danro
+  block <visitorId>`, and an audit log.
+- **Cloudflare Workers + Durable Objects port** — production target.
+
 ## License
 
 MIT. See [LICENSE](LICENSE).
