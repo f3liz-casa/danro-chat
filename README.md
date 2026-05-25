@@ -10,7 +10,13 @@ up in your team chat as a topic / thread. Your team replies there, the
 visitor sees it in the widget. No third-party SaaS, no per-seat pricing.
 
 ```html
+<!-- Zulip-backed widget -->
 <danro-talk ws-url="wss://chat.example.org" lang="ja"></danro-talk>
+
+<!-- Discord-backed widget -->
+<danro-talk ws-url="wss://chat.example.org" lang="ko"
+            target="discord" site-id="dc_xxxxxxxxxxxx"></danro-talk>
+
 <script type="module" src="https://cdn.example.org/chat-widget.js"></script>
 ```
 
@@ -54,23 +60,59 @@ The demo shows side-by-side JP (→ Zulip) and KO (→ Discord) widgets.
 ### Discord setup
 
 1. Create a Discord application + bot; **enable the MESSAGE CONTENT privileged intent**
-2. Invite the bot with scopes `bot applications.commands` and the following
-   permissions: `View Channels`, `Send Messages`, `Send Messages in Threads`,
+2. Invite the bot with scopes `bot applications.commands` and these
+   permissions (integer `326954454016`):
+   `View Channels`, `Send Messages`, `Send Messages in Threads`,
    `Create Public Threads`, `Manage Threads`, `Read Message History`,
    `Manage Webhooks`
-3. Put `DISCORD_BOT_TOKEN` into `.env` and start the server
-4. In Discord, run `/danro set-channel #your-channel` (admins only) — the bot
-   will auto-create a webhook in that channel and persist the config
+3. Put `DISCORD_BOT_TOKEN` into `.env`, start the server
+4. In Discord, run **`/danro set-channel #your-channel`** (admins only). The bot:
+   - auto-creates a webhook in that channel
+   - issues a **siteId** (e.g. `dc_V1StGXR8Z5jd`) — shown ephemerally to the admin
+   - prints the embed snippet to paste into your site
+5. Embed the widget with the issued siteId:
+   ```html
+   <danro-talk ws-url="wss://your-server"
+               target="discord"
+               site-id="dc_V1StGXR8Z5jd"
+               lang="ko"></danro-talk>
+   ```
+6. (Recommended) lock the siteId to your site's domain:
+   ```
+   /danro set-origin https://joinfediverse.kr
+   ```
 
 Visitor messages are posted via webhook with the visitor's nickname as the
-sender's display name — so in Discord they look like real people, not bot
-output.
+sender display name — in Discord they look like real users, not bot output.
 
-Slash commands (require `Manage Server` permission by default):
+#### Slash commands (require `Manage Server` permission by default)
 
-- `/danro set-channel <channel>` — pick the parent text channel
-- `/danro show` — show current configuration
-- `/danro disable` — remove configuration
+| Command | What it does |
+|---|---|
+| `/danro set-channel <channel>` | Set parent channel; issues siteId |
+| `/danro show` | Display current channel, siteId, allowed origins |
+| `/danro set-origin <domains>` | Comma-separated allowlist; empty to clear |
+| `/danro rotate-id` | Issue a new siteId; old widgets break, sessions close |
+| `/danro disable` | Remove configuration; active sessions close |
+
+#### Security model
+
+The siteId is **public** (it lives in your site's HTML) so think of it as a
+routing token, not a secret:
+
+1. **Origin allowlist** (strongest) — once you `/danro set-origin yoursite.com`,
+   the server checks the browser-supplied `Origin` header on every WS handshake.
+   Browsers can't fake `Origin`, so casual abuse — someone copying your siteId
+   and embedding the widget on their own site — is blocked entirely.
+2. **siteId** — filters out misconfigured clients and accidental embeds.
+3. **Rotate** — incident response. If you suspect abuse, rotate the siteId
+   and update your embed; old copies stop working immediately.
+4. **Disable** — kill switch; configuration deleted, active sessions closed.
+
+The remaining attack surface is "someone writes a custom non-browser client
+that forges the `Origin` header." That's not a defense any embedded widget
+can fully prevent without server-issued short-lived tokens — out of scope for
+Phase 1, but tractable later with rate limits and content-side controls.
 
 ## Architecture
 
