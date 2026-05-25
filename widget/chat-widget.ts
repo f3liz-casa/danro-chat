@@ -1,3 +1,4 @@
+import twemoji from "@twemoji/api";
 import * as v from "valibot";
 
 type WelcomeFrame = { type: "welcome"; visitorId: string; nickname: string | null; email: string | null; returning: boolean; hasHistory: boolean; emojis: Record<string, string> };
@@ -158,6 +159,7 @@ const css = `
   .msg .who { display: block; font-size: 11px; color: var(--muted); margin-bottom: 2px; }
   .msg .time { display: block; font-size: 10px; color: var(--muted); text-align: right; margin-top: 3px; }
   .inline-emoji { height: 1.2em; width: auto; vertical-align: -0.2em; margin: 0 1px; }
+  img.emoji { height: 1.2em; width: 1.2em; vertical-align: -0.2em; margin: 0 1px; }
   .status { font-size: 12px; color: var(--muted); align-self: center; padding: 4px 0; }
   .entry {
     flex: 1;
@@ -525,6 +527,11 @@ class DanroTalk extends HTMLElement {
       el.appendChild(who);
     }
     this.renderTextWithEmoji(el, m.text);
+    twemoji.parse(el, {
+      folder: "svg",
+      ext: ".svg",
+      base: "https://cdn.jsdelivr.net/gh/jdecked/twemoji@latest/assets/",
+    });
     const time = document.createElement("time");
     time.className = "time";
     time.dateTime = new Date(m.ts).toISOString();
@@ -572,6 +579,11 @@ class DanroTalk extends HTMLElement {
     const el = document.createElement("div");
     el.className = "intro";
     el.innerHTML = this.strings.introHtml;
+    twemoji.parse(el, {
+      folder: "svg",
+      ext: ".svg",
+      base: "https://cdn.jsdelivr.net/gh/jdecked/twemoji@latest/assets/",
+    });
     this.log.appendChild(el);
   }
 
