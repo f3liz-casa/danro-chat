@@ -69,7 +69,7 @@ const RECONNECT_DELAY_MS = 5000;
 const DISCORD_COMMAND_DEFS = [
   {
     name: "danro",
-    description: "danro-chat configuration",
+    description: "danro-talk configuration",
     default_member_permissions: PERM_MANAGE_GUILD,
     options: [
       {
@@ -229,7 +229,7 @@ export class DiscordAdapter {
       try {
         const whRes = await this.dgApi(`/channels/${channelId}/webhooks`, {
           method: "POST",
-          body: JSON.stringify({ name: "danro-chat" }),
+          body: JSON.stringify({ name: "danro-talk" }),
         });
         if (!whRes.ok) throw new Error(`${whRes.status} ${await whRes.text()}`);
         const wh = await whRes.json() as { id: string; token: string };
@@ -251,7 +251,7 @@ export class DiscordAdapter {
         this.dgThreadById.clear();
         await this.dgLoadThreads();
         await respond(
-          `✅ Set to <#${channelId}>.\n\nsiteId: \`${siteId}\`\n\nEmbed code:\n\`\`\`html\n<danro-talk ws-url="wss://your-worker.workers.dev" site-id="${siteId}"></danro-talk>\n\`\`\``,
+          `✅ Set to <#${channelId}>.\n\nsiteId: \`${siteId}\`\n\nEmbed code:\n\`\`\`html\n<script type="module" src="https://danro-api.atfedi.de/widget.js"></script>\n<danro-talk site-id="${siteId}"></danro-talk>\n\`\`\``,
         );
       } catch (e) {
         await respond(`❌ Failed: ${e instanceof Error ? e.message : String(e)}`);
@@ -367,7 +367,7 @@ export class DiscordAdapter {
         d: {
           token: this.env.DISCORD_BOT_TOKEN,
           intents,
-          properties: { os: "linux", browser: "danro-chat", device: "danro-chat" },
+          properties: { os: "linux", browser: "danro-talk", device: "danro-talk" },
         },
       }));
       return;

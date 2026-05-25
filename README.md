@@ -1,4 +1,4 @@
-# danro-chat
+# danro-talk
 
 Async web chat widget that bridges website visitors to your team's
 [Zulip](https://zulip.com/) or [Discord](https://discord.com/) — with
@@ -63,7 +63,7 @@ chain (20-second interval).
 ### 1. Clone & install
 
 ```sh
-git clone https://github.com/yourname/danro-talk
+git clone https://github.com/f3liz-casa/danro-talk
 cd danro-talk
 npm install
 ```

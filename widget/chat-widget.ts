@@ -320,8 +320,7 @@ class DanroTalk extends HTMLElement {
       if (meta.protocol === "https:" || meta.protocol === "http:") {
         url = meta.origin.replace(/^https/, "wss").replace(/^http$/, "ws");
       } else {
-        this.textContent = this.strings.attrMissing;
-        return;
+        url = "wss://danro-api.atfedi.de";
       }
     }
     this.render();
