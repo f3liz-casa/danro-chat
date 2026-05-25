@@ -51,6 +51,11 @@ const cfg = {
 };
 const stream = process.env.ZULIP_STREAM!;
 const visitorEmoji = process.env.ZULIP_VISITOR_EMOJI ?? "";
+const requiredSiteId = process.env.ZULIP_SITE_ID ?? "";
+const allowedOrigins = (process.env.ZULIP_ORIGINS ?? "")
+  .split(",")
+  .map((s) => s.trim().toLowerCase().replace(/\/$/, ""))
+  .filter((s) => s.length > 0);
 
 let client: ZulipClient | null = null;
 let botEmail = "";
@@ -113,6 +118,17 @@ export const zulipAdapter: Adapter = {
       if (m.sender_email === botEmail) return;
       onMessage({ topic: m.subject, senderName: m.sender_full_name, text: m.content });
     }, ["message"]);
+  },
+
+  validateHello(siteId, origin) {
+    if (requiredSiteId && siteId !== requiredSiteId) return { ok: false, reason: "invalid_site_id" };
+    if (allowedOrigins.length > 0) {
+      if (!origin) return { ok: false, reason: "origin_required" };
+      if (!allowedOrigins.includes(origin.toLowerCase().replace(/\/$/, ""))) {
+        return { ok: false, reason: "origin_not_allowed" };
+      }
+    }
+    return { ok: true };
   },
 
   async emojis(): Promise<Record<string, string>> {

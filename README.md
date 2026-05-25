@@ -56,6 +56,17 @@ The demo shows side-by-side JP (→ Zulip) and KO (→ Discord) widgets.
 1. Create a Generic Bot in your Zulip realm; download its `zuliprc`
 2. Create a stream (the env default is `web-相談`); subscribe the bot
 3. Put `ZULIP_REALM` / `ZULIP_USERNAME` / `ZULIP_API_KEY` / `ZULIP_STREAM` into `.env`
+4. (Recommended) generate a siteId and lock down origins via env:
+   ```
+   ZULIP_SITE_ID=zu_yourchoice
+   ZULIP_ORIGINS=https://atfedi.de
+   ```
+   Embed with `<danro-talk site-id="zu_yourchoice" lang="ja">`. To rotate,
+   change the env value and restart.
+
+Both fields are optional — if `ZULIP_SITE_ID` is unset, the server accepts
+any widget; if `ZULIP_ORIGINS` is unset, any origin is accepted. Set them
+in production.
 
 ### Discord setup
 

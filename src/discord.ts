@@ -76,15 +76,6 @@ export function setOnDisable(fn: () => void): void {
   onDisableHandler = fn;
 }
 
-export function validateDiscordHello(siteId: string | undefined, origin: string | undefined): { ok: true } | { ok: false; reason: string } {
-  if (!config) return { ok: false, reason: "service_unavailable" };
-  if (!siteId || siteId !== config.siteId) return { ok: false, reason: "invalid_site_id" };
-  if (config.origins.length > 0) {
-    if (!origin) return { ok: false, reason: "origin_required" };
-    if (!config.origins.includes(normalizeOrigin(origin))) return { ok: false, reason: "origin_not_allowed" };
-  }
-  return { ok: true };
-}
 
 async function api(path: string, init: RequestInit = {}): Promise<Response> {
   return fetch(`${API}${path}`, {
@@ -424,6 +415,16 @@ export const discordAdapter: Adapter = {
         text: msg.content ?? "",
       });
     });
+  },
+
+  validateHello(siteId, origin) {
+    if (!config) return { ok: false, reason: "service_unavailable" };
+    if (!siteId || siteId !== config.siteId) return { ok: false, reason: "invalid_site_id" };
+    if (config.origins.length > 0) {
+      if (!origin) return { ok: false, reason: "origin_required" };
+      if (!config.origins.includes(normalizeOrigin(origin))) return { ok: false, reason: "origin_not_allowed" };
+    }
+    return { ok: true };
   },
 
   async emojis(): Promise<Record<string, string>> {

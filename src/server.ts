@@ -3,7 +3,7 @@ import { WebSocketServer, type WebSocket } from "ws";
 import type { Adapter, Target } from "./adapter.js";
 import { attach, detach, ensureTopic, getByTopic, setEmail, setNickname, type Conversation } from "./conversations.js";
 import type { IncomingMessage } from "node:http";
-import { discordAdapter, setOnDisable, validateDiscordHello } from "./discord.js";
+import { discordAdapter, setOnDisable } from "./discord.js";
 import { zulipAdapter } from "./zulip.js";
 
 type ClientHello = { type: "hello"; visitorId?: string; locale?: string; target?: Target; siteId?: string };
@@ -80,19 +80,18 @@ wss.on("connection", (ws, req: IncomingMessage) => {
 
     if (frame.type === "hello") {
       const target: Target = frame.target ?? "zulip";
-      if (!adapters[target]) {
+      const adapter = adapters[target];
+      if (!adapter) {
         send(ws, { type: "error", reason: "unknown_target" });
         return;
       }
-      if (target === "discord") {
-        const result = validateDiscordHello(frame.siteId, origin);
-        if (!result.ok) {
-          send(ws, { type: "error", reason: result.reason });
-          ws.close(1008, result.reason);
-          return;
-        }
-        discordSessions.add(ws);
+      const result = adapter.validateHello(frame.siteId, origin);
+      if (!result.ok) {
+        send(ws, { type: "error", reason: result.reason });
+        ws.close(1008, result.reason);
+        return;
       }
+      if (target === "discord") discordSessions.add(ws);
       const { conv: c, returning } = attach(frame.visitorId ?? null, ws, target, frame.locale);
       conv = c;
       const hasHistory = returning && !!c.topic;
