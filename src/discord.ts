@@ -1,5 +1,6 @@
 import { existsSync, mkdirSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
 import { dirname } from "node:path";
+import { nanoid } from "nanoid";
 import { WebSocket as WSClient } from "ws";
 import type { Adapter, HistoryMessage, InboundMessage } from "./adapter.js";
 
@@ -9,7 +10,14 @@ const CONFIG_PATH = process.env.DISCORD_CONFIG_PATH ?? "data/discord-config.json
 const API = "https://discord.com/api/v10";
 const GATEWAY = "wss://gateway.discord.gg/?v=10&encoding=json";
 
-type DiscordConfig = { guildId: string; channelId: string; webhookUrl: string };
+type DiscordConfig = {
+  siteId: string;
+  guildId: string;
+  channelId: string;
+  webhookUrl: string;
+  origins: string[];
+};
+
 type DiscordMessage = {
   id: string;
   channel_id: string;
@@ -23,11 +31,21 @@ let config: DiscordConfig | null = null;
 let botUserId: string | null = null;
 const threadByName = new Map<string, string>();
 const threadById = new Map<string, string>();
+let onDisableHandler: (() => void) | null = null;
 
 function loadConfig(): void {
   if (!existsSync(CONFIG_PATH)) return;
   try {
-    config = JSON.parse(readFileSync(CONFIG_PATH, "utf8")) as DiscordConfig;
+    const raw = JSON.parse(readFileSync(CONFIG_PATH, "utf8")) as Partial<DiscordConfig>;
+    if (raw.siteId && raw.guildId && raw.channelId && raw.webhookUrl) {
+      config = {
+        siteId: raw.siteId,
+        guildId: raw.guildId,
+        channelId: raw.channelId,
+        webhookUrl: raw.webhookUrl,
+        origins: raw.origins ?? [],
+      };
+    }
   } catch (e) {
     console.error("[discord:config] failed to load", e);
   }
@@ -44,6 +62,28 @@ function clearConfig(): void {
   threadByName.clear();
   threadById.clear();
   if (existsSync(CONFIG_PATH)) unlinkSync(CONFIG_PATH);
+}
+
+function newSiteId(): string {
+  return `dc_${nanoid(12)}`;
+}
+
+function normalizeOrigin(s: string): string {
+  return s.trim().toLowerCase().replace(/\/$/, "");
+}
+
+export function setOnDisable(fn: () => void): void {
+  onDisableHandler = fn;
+}
+
+export function validateDiscordHello(siteId: string | undefined, origin: string | undefined): { ok: true } | { ok: false; reason: string } {
+  if (!config) return { ok: false, reason: "service_unavailable" };
+  if (!siteId || siteId !== config.siteId) return { ok: false, reason: "invalid_site_id" };
+  if (config.origins.length > 0) {
+    if (!origin) return { ok: false, reason: "origin_required" };
+    if (!config.origins.includes(normalizeOrigin(origin))) return { ok: false, reason: "origin_not_allowed" };
+  }
+  return { ok: true };
 }
 
 async function api(path: string, init: RequestInit = {}): Promise<Response> {
@@ -70,7 +110,7 @@ async function loadActiveThreads(): Promise<void> {
 }
 
 async function ensureThread(name: string): Promise<string> {
-  if (!config) throw new Error("discord not configured (run /danro set-channel)");
+  if (!config) throw new Error("discord not configured");
   const cached = threadByName.get(name);
   if (cached) return cached;
   const res = await api(`/channels/${config.channelId}/threads`, {
@@ -102,20 +142,31 @@ async function respondInteraction(id: string, token: string, content: string): P
   });
 }
 
+type InteractionOption = {
+  name: string;
+  type: number;
+  value?: string;
+  options?: InteractionOption[];
+};
+
 type InteractionData = {
   id: string;
   token: string;
   type: number;
   guild_id?: string;
-  data?: {
-    name: string;
-    options?: Array<{
-      name: string;
-      type: number;
-      options?: Array<{ name: string; value: string }>;
-    }>;
-  };
+  data?: { name: string; options?: InteractionOption[] };
 };
+
+function embedSnippet(siteId: string): string {
+  return [
+    "埋め込みコード:",
+    "```html",
+    `<danro-talk ws-url="wss://your-server" site-id="${siteId}"></danro-talk>`,
+    "```",
+    "**siteId** は HTML 上に公開されます。漏洩したら `/danro rotate-id` で再発行できます。",
+    "ドメイン制限したい場合は `/danro set-origin example.com` で設定してください。",
+  ].join("\n");
+}
 
 async function handleInteraction(d: InteractionData): Promise<void> {
   if (d.type !== 2 || d.data?.name !== "danro") return;
@@ -130,8 +181,9 @@ async function handleInteraction(d: InteractionData): Promise<void> {
     }
     try {
       const webhook = await createWebhook(channelId);
-      const wasConfigured = config !== null;
-      config = { guildId: d.guild_id, channelId, webhookUrl: webhook.url };
+      const siteId = config?.guildId === d.guild_id ? config.siteId : newSiteId();
+      const origins = config?.guildId === d.guild_id ? config.origins : [];
+      config = { siteId, guildId: d.guild_id, channelId, webhookUrl: webhook.url, origins };
       saveConfig();
       threadByName.clear();
       threadById.clear();
@@ -139,9 +191,7 @@ async function handleInteraction(d: InteractionData): Promise<void> {
       await respondInteraction(
         d.id,
         d.token,
-        wasConfigured
-          ? `✅ <#${channelId}> に変更しました。`
-          : `✅ <#${channelId}> に設定しました。これ以降の訪問者メッセージはここのスレッドに届きます。`,
+        `✅ <#${channelId}> に設定しました。\n\nsiteId: \`${siteId}\`\n\n${embedSnippet(siteId)}`,
       );
     } catch (e) {
       await respondInteraction(d.id, d.token, `❌ 失敗しました: ${e instanceof Error ? e.message : String(e)}`);
@@ -151,9 +201,55 @@ async function handleInteraction(d: InteractionData): Promise<void> {
 
   if (sub.name === "show") {
     if (config && config.guildId === d.guild_id) {
-      await respondInteraction(d.id, d.token, `現在のチャンネル: <#${config.channelId}>`);
+      const originsLine = config.origins.length > 0 ? config.origins.join(", ") : "（未設定 — どこからでも接続可）";
+      await respondInteraction(
+        d.id,
+        d.token,
+        [
+          `**channel**: <#${config.channelId}>`,
+          `**siteId**: \`${config.siteId}\``,
+          `**origins**: ${originsLine}`,
+        ].join("\n"),
+      );
     } else {
       await respondInteraction(d.id, d.token, "未設定です。`/danro set-channel` で設定してください。");
+    }
+    return;
+  }
+
+  if (sub.name === "rotate-id") {
+    if (!config || config.guildId !== d.guild_id) {
+      await respondInteraction(d.id, d.token, "未設定です。");
+      return;
+    }
+    const siteId = newSiteId();
+    config = { ...config, siteId };
+    saveConfig();
+    onDisableHandler?.();
+    await respondInteraction(
+      d.id,
+      d.token,
+      `✅ siteId を再発行しました: \`${siteId}\`\n旧 siteId は無効、既存の widget セッションは切断されました。\n\n${embedSnippet(siteId)}`,
+    );
+    return;
+  }
+
+  if (sub.name === "set-origin") {
+    if (!config || config.guildId !== d.guild_id) {
+      await respondInteraction(d.id, d.token, "先に `/danro set-channel` で設定してください。");
+      return;
+    }
+    const value = sub.options?.find((o) => o.name === "domains")?.value ?? "";
+    const list = value
+      .split(",")
+      .map((s) => normalizeOrigin(s))
+      .filter((s) => s.length > 0);
+    config = { ...config, origins: list };
+    saveConfig();
+    if (list.length === 0) {
+      await respondInteraction(d.id, d.token, "✅ ドメイン制限を解除しました（どこからでも接続可）。");
+    } else {
+      await respondInteraction(d.id, d.token, `✅ 許可ドメイン: ${list.join(", ")}`);
     }
     return;
   }
@@ -161,7 +257,8 @@ async function handleInteraction(d: InteractionData): Promise<void> {
   if (sub.name === "disable") {
     if (config && config.guildId === d.guild_id) {
       clearConfig();
-      await respondInteraction(d.id, d.token, "✅ 無効化しました。");
+      onDisableHandler?.();
+      await respondInteraction(d.id, d.token, "✅ 無効化しました。既存の widget セッションは切断されました。");
     } else {
       await respondInteraction(d.id, d.token, "このサーバには設定がありません。");
     }
@@ -182,16 +279,19 @@ async function registerCommands(): Promise<void> {
           description: "Set the parent channel for visitor conversations",
           type: 1,
           options: [
-            {
-              name: "channel",
-              description: "Parent text channel",
-              type: 7,
-              required: true,
-              channel_types: [0],
-            },
+            { name: "channel", description: "Parent text channel", type: 7, required: true, channel_types: [0] },
           ],
         },
         { name: "show", description: "Show current configuration", type: 1 },
+        { name: "rotate-id", description: "Rotate the siteId (invalidates old widget embeds)", type: 1 },
+        {
+          name: "set-origin",
+          description: "Restrict by domain (comma-separated; empty to clear)",
+          type: 1,
+          options: [
+            { name: "domains", description: "e.g. https://example.com,https://example.org", type: 3, required: true },
+          ],
+        },
         { name: "disable", description: "Disable visitor chat in this server", type: 1 },
       ],
     },
@@ -223,7 +323,7 @@ function connectGateway(onMessage: (m: DiscordMessage) => void): void {
 
     if (payload.op === 10) {
       heartbeat = setInterval(() => ws.send(JSON.stringify({ op: 1, d: seq })), payload.d.heartbeat_interval);
-      const intents = (1 << 0) | (1 << 9) | (1 << 15); // GUILDS | GUILD_MESSAGES | MESSAGE_CONTENT
+      const intents = (1 << 0) | (1 << 9) | (1 << 15);
       ws.send(JSON.stringify({
         op: 2,
         d: {

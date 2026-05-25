@@ -2,10 +2,11 @@ import "dotenv/config";
 import { WebSocketServer, type WebSocket } from "ws";
 import type { Adapter, Target } from "./adapter.js";
 import { attach, detach, ensureTopic, getByTopic, setEmail, setNickname, type Conversation } from "./conversations.js";
-import { discordAdapter } from "./discord.js";
+import type { IncomingMessage } from "node:http";
+import { discordAdapter, setOnDisable, validateDiscordHello } from "./discord.js";
 import { zulipAdapter } from "./zulip.js";
 
-type ClientHello = { type: "hello"; visitorId?: string; locale?: string; target?: Target };
+type ClientHello = { type: "hello"; visitorId?: string; locale?: string; target?: Target; siteId?: string };
 type ClientMessage = { type: "message"; text: string };
 type ClientSetNickname = { type: "set_nickname"; nickname: string; email?: string | null };
 type ClientFrame = ClientHello | ClientMessage | ClientSetNickname;
@@ -50,8 +51,23 @@ function send(ws: WebSocket, frame: ServerFrame): void {
 const wss = new WebSocketServer({ port: PORT });
 console.log(`[ws] listening on :${PORT}`);
 
-wss.on("connection", (ws) => {
+const discordSessions = new Set<WebSocket>();
+
+setOnDisable(() => {
+  for (const ws of discordSessions) {
+    try {
+      send(ws, { type: "error", reason: "service_unavailable" });
+      ws.close(1001, "discord disabled");
+    } catch {
+      // ignore
+    }
+  }
+  discordSessions.clear();
+});
+
+wss.on("connection", (ws, req: IncomingMessage) => {
   let conv: Conversation | null = null;
+  const origin = req.headers.origin;
 
   ws.on("message", async (raw) => {
     let frame: ClientFrame;
@@ -67,6 +83,15 @@ wss.on("connection", (ws) => {
       if (!adapters[target]) {
         send(ws, { type: "error", reason: "unknown_target" });
         return;
+      }
+      if (target === "discord") {
+        const result = validateDiscordHello(frame.siteId, origin);
+        if (!result.ok) {
+          send(ws, { type: "error", reason: result.reason });
+          ws.close(1008, result.reason);
+          return;
+        }
+        discordSessions.add(ws);
       }
       const { conv: c, returning } = attach(frame.visitorId ?? null, ws, target, frame.locale);
       conv = c;
@@ -132,6 +157,7 @@ wss.on("connection", (ws) => {
   });
 
   ws.on("close", () => {
+    discordSessions.delete(ws);
     if (conv) detach(conv.visitorId);
   });
 });

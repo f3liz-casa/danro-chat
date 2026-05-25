@@ -419,10 +419,12 @@ class DanroTalk extends HTMLElement {
     ws.addEventListener("open", () => {
       const stored = localStorage.getItem(STORAGE_KEY);
       const target = this.getAttribute("target");
+      const siteId = this.getAttribute("site-id");
       ws.send(JSON.stringify({
         type: "hello",
         locale: this.locale,
         ...(target ? { target } : {}),
+        ...(siteId ? { siteId } : {}),
         ...(stored ? { visitorId: stored } : {}),
       }));
     });
