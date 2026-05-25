@@ -5,7 +5,7 @@ type NicknameUpdatedFrame = { type: "nickname_updated"; nickname: string | null;
 type ErrorFrame = { type: "error"; reason: string };
 type ServerFrame = WelcomeFrame | MessageFrame | HistoryEndFrame | NicknameUpdatedFrame | ErrorFrame;
 
-const STORAGE_KEY = "danro-talk:visitorId";
+const STORAGE_KEY_BASE = "danro-talk:visitorId";
 
 type Locale = "ja" | "ko";
 
@@ -285,6 +285,7 @@ class DanroTalk extends HTMLElement {
   private nickname: string | null = null;
   private locale: Locale = "ja";
   private strings: Strings = STRINGS.ja;
+  private storageKey: string = STORAGE_KEY_BASE;
   private panel!: HTMLDivElement;
   private entryInput!: HTMLInputElement;
   private entryEmail!: HTMLInputElement;
@@ -298,6 +299,9 @@ class DanroTalk extends HTMLElement {
   connectedCallback(): void {
     this.locale = detectLocale(this);
     this.strings = STRINGS[this.locale];
+    const siteId = this.getAttribute("site-id");
+    const target = this.getAttribute("target") ?? "zulip";
+    this.storageKey = `${STORAGE_KEY_BASE}:${siteId ?? target}`;
     const url = this.getAttribute("ws-url");
     if (!url) {
       this.textContent = this.strings.attrMissing;
@@ -324,7 +328,7 @@ class DanroTalk extends HTMLElement {
           <input id="entry-input" type="text" maxlength="40" placeholder="${s.entryPlaceholder}" autocomplete="off" />
           <p class="sub">${s.entryEmailLabel}</p>
           <input id="entry-email" type="email" maxlength="200" placeholder="${s.entryEmailPlaceholder}" autocomplete="email" />
-          <button id="entry-button" disabled>${s.entryButton}</button>
+          <button id="entry-button">${s.entryButton}</button>
         </div>
         <div class="log" id="log"></div>
         <form id="form">
@@ -348,27 +352,49 @@ class DanroTalk extends HTMLElement {
     this.entryEmail = root.getElementById("entry-email") as HTMLInputElement;
     this.entryButton = root.getElementById("entry-button") as HTMLButtonElement;
 
-    this.entryInput.addEventListener("input", () => {
-      this.entryButton.disabled = this.entryInput.value.trim().length === 0;
-    });
     const onEnterSubmit = (e: KeyboardEvent): void => {
-      if (e.key === "Enter" && !this.entryButton.disabled) {
+      if (e.key === "Enter") {
         e.preventDefault();
         this.submitEntry();
       }
     };
     this.entryInput.addEventListener("keydown", onEnterSubmit);
     this.entryEmail.addEventListener("keydown", onEnterSubmit);
-    this.entryButton.addEventListener("click", () => this.submitEntry());
+    const tryEntrySubmit = (e: Event): void => {
+      e.preventDefault();
+      const wasFocused = this.shadowRoot?.activeElement === this.entryInput;
+      if (wasFocused) this.entryInput.blur();
+      requestAnimationFrame(() => this.submitEntry());
+    };
+    this.entryButton.addEventListener("mousedown", tryEntrySubmit);
+    this.entryButton.addEventListener("mouseup", tryEntrySubmit);
+    this.entryButton.addEventListener("click", tryEntrySubmit);
+    this.entryButton.addEventListener("touchstart", tryEntrySubmit, { passive: false });
 
     const form = root.getElementById("form") as HTMLFormElement;
     form.addEventListener("submit", (e) => {
       e.preventDefault();
       this.submit();
     });
-    this.input.addEventListener("input", () => {
+    const trySubmit = (e: Event): void => {
+      if (this.button.disabled) return;
+      e.preventDefault();
+      const wasFocused = this.shadowRoot?.activeElement === this.input;
+      if (wasFocused) this.input.blur();
+      requestAnimationFrame(() => {
+        this.submit();
+        if (wasFocused) this.input.focus();
+      });
+    };
+    this.button.addEventListener("mousedown", trySubmit);
+    this.button.addEventListener("mouseup", trySubmit);
+    this.button.addEventListener("click", trySubmit);
+    this.button.addEventListener("touchstart", trySubmit, { passive: false });
+    const syncReplicated = (): void => {
       this.inputWrap.dataset.replicatedValue = this.input.value;
-    });
+    };
+    this.input.addEventListener("input", syncReplicated);
+    this.input.addEventListener("compositionend", syncReplicated);
     this.input.addEventListener("keydown", (e) => {
       if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) {
         e.preventDefault();
@@ -402,7 +428,6 @@ class DanroTalk extends HTMLElement {
       nickname,
       email: email || null,
     }));
-    this.entryButton.disabled = true;
   }
 
   private submit(): void {
@@ -417,7 +442,7 @@ class DanroTalk extends HTMLElement {
     const ws = new WebSocket(url);
     this.ws = ws;
     ws.addEventListener("open", () => {
-      const stored = localStorage.getItem(STORAGE_KEY);
+      const stored = localStorage.getItem(this.storageKey);
       const target = this.getAttribute("target");
       const siteId = this.getAttribute("site-id");
       ws.send(JSON.stringify({
@@ -446,7 +471,7 @@ class DanroTalk extends HTMLElement {
     if (frame.type === "welcome") {
       this.emojis = frame.emojis ?? {};
       this.nickname = frame.nickname;
-      localStorage.setItem(STORAGE_KEY, frame.visitorId);
+      localStorage.setItem(this.storageKey, frame.visitorId);
       this.renderName();
       if (!frame.nickname) {
         this.panel.classList.add("entering");

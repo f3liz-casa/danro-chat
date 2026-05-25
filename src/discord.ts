@@ -257,44 +257,65 @@ async function handleInteraction(d: InteractionData): Promise<void> {
   }
 }
 
-async function registerCommands(): Promise<void> {
-  if (!botUserId) return;
-  const commands = [
-    {
-      name: "danro",
-      description: "danro-chat configuration",
-      default_member_permissions: "32", // MANAGE_GUILD
-      options: [
-        {
-          name: "set-channel",
-          description: "Set the parent channel for visitor conversations",
-          type: 1,
-          options: [
-            { name: "channel", description: "Parent text channel", type: 7, required: true, channel_types: [0] },
-          ],
-        },
-        { name: "show", description: "Show current configuration", type: 1 },
-        { name: "rotate-id", description: "Rotate the siteId (invalidates old widget embeds)", type: 1 },
-        {
-          name: "set-origin",
-          description: "Restrict by domain (comma-separated; empty to clear)",
-          type: 1,
-          options: [
-            { name: "domains", description: "e.g. https://example.com,https://example.org", type: 3, required: true },
-          ],
-        },
-        { name: "disable", description: "Disable visitor chat in this server", type: 1 },
-      ],
-    },
-  ];
+const COMMAND_DEFS = [
+  {
+    name: "danro",
+    description: "danro-chat configuration",
+    default_member_permissions: "32", // MANAGE_GUILD
+    options: [
+      {
+        name: "set-channel",
+        description: "Set the parent channel for visitor conversations",
+        type: 1,
+        options: [
+          { name: "channel", description: "Parent text channel", type: 7, required: true, channel_types: [0] },
+        ],
+      },
+      { name: "show", description: "Show current configuration", type: 1 },
+      { name: "rotate-id", description: "Rotate the siteId (invalidates old widget embeds)", type: 1 },
+      {
+        name: "set-origin",
+        description: "Restrict by domain (comma-separated; empty to clear)",
+        type: 1,
+        options: [
+          { name: "domains", description: "e.g. https://example.com,https://example.org", type: 3, required: true },
+        ],
+      },
+      { name: "disable", description: "Disable visitor chat in this server", type: 1 },
+    ],
+  },
+];
+
+const registeredGuilds = new Set<string>();
+const registeringGuilds = new Set<string>();
+let globalCleared = false;
+
+async function clearGlobalCommandsOnce(): Promise<void> {
+  if (!botUserId || globalCleared) return;
+  globalCleared = true;
   const res = await api(`/applications/${botUserId}/commands`, {
     method: "PUT",
-    body: JSON.stringify(commands),
+    body: JSON.stringify([]),
   });
-  if (!res.ok) {
-    console.error("[discord:commands]", res.status, await res.text());
-  } else {
-    console.log("[discord] slash commands registered");
+  if (!res.ok) console.error("[discord:commands] failed to clear global", res.status);
+}
+
+async function registerCommandsForGuild(guildId: string): Promise<void> {
+  if (!botUserId || registeredGuilds.has(guildId) || registeringGuilds.has(guildId)) return;
+  registeringGuilds.add(guildId);
+  try {
+    const res = await api(`/applications/${botUserId}/guilds/${guildId}/commands`, {
+      method: "PUT",
+      body: JSON.stringify(COMMAND_DEFS),
+    });
+    if (!res.ok) {
+      console.error("[discord:commands]", guildId, res.status, await res.text());
+    } else {
+      registeredGuilds.add(guildId);
+      console.log(`[discord] slash commands registered for guild ${guildId}`);
+    }
+  } finally {
+    registeringGuilds.delete(guildId);
   }
 }
 
@@ -329,8 +350,16 @@ function connectGateway(onMessage: (m: DiscordMessage) => void): void {
     if (payload.op === 0) {
       if (payload.t === "READY") {
         botUserId = payload.d.user?.id ?? null;
-        await registerCommands();
+        await clearGlobalCommandsOnce();
+        const guilds = (payload.d.guilds ?? []) as Array<{ id: string; unavailable?: boolean }>;
+        for (const g of guilds) {
+          if (!g.unavailable) await registerCommandsForGuild(g.id);
+        }
         await loadActiveThreads();
+      }
+      if (payload.t === "GUILD_CREATE") {
+        const g = payload.d as { id: string; unavailable?: boolean };
+        if (!g.unavailable) await registerCommandsForGuild(g.id);
       }
       if (payload.t === "MESSAGE_CREATE") onMessage(payload.d as DiscordMessage);
       if (payload.t === "INTERACTION_CREATE") {
@@ -375,7 +404,7 @@ export const discordAdapter: Adapter = {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
-        username: sender.nickname,
+        username: `danro ${sender.nickname}`,
         content: text,
         allowed_mentions: { parse: [] },
       }),
