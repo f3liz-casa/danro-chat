@@ -4,5 +4,7 @@ widget/chat-widget.js
 data/
 .env
 .env.local
+.dev.vars
+.wrangler/
 *.log
 .DS_Store

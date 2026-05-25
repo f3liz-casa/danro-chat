@@ -1,0 +1,18 @@
+name = "danro-talk"
+main = "src/worker.ts"
+compatibility_date = "2025-01-01"
+
+[[durable_objects.bindings]]
+name = "CHAT_SERVER"
+class_name = "ChatServer"
+
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["ChatServer"]
+
+[triggers]
+crons = ["* * * * *"]
+
+# Secrets (set via scripts/set-secrets.sh and scripts/set-discord-secret.sh):
+#   ZULIP_REALM, ZULIP_USERNAME, ZULIP_API_KEY
+#   DISCORD_BOT_TOKEN (optional)

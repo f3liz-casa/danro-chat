@@ -1,22 +1,11 @@
-import { existsSync, mkdirSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
-import { dirname } from "node:path";
 import { nanoid } from "nanoid";
-import { WebSocket as WSClient } from "ws";
-import type { Adapter, HistoryMessage, InboundMessage } from "./adapter.js";
+import type { Env } from "./worker.js";
+import type { DiscordConfig, HistoryMessage } from "./types.js";
+import { normalizeOrigin, parseOrigins } from "./types.js";
 
-const BOT_TOKEN = process.env.DISCORD_BOT_TOKEN ?? "";
-const CONFIG_PATH = process.env.DISCORD_CONFIG_PATH ?? "data/discord-config.json";
+export type { DiscordConfig };
 
-const API = "https://discord.com/api/v10";
-const GATEWAY = "wss://gateway.discord.gg/?v=10&encoding=json";
-
-type DiscordConfig = {
-  siteId: string;
-  guildId: string;
-  channelId: string;
-  webhookUrl: string;
-  origins: string[];
-};
+export type OnAgentMessage = (topic: string, senderName: string, text: string) => void;
 
 type DiscordMessage = {
   id: string;
@@ -28,253 +17,66 @@ type DiscordMessage = {
   webhook_id?: string;
 };
 
-function displayNameOf(m: DiscordMessage): string {
-  return m.member?.nick ?? m.author?.global_name ?? m.author?.username ?? "unknown";
-}
-
-let config: DiscordConfig | null = null;
-let botUserId: string | null = null;
-const threadByName = new Map<string, string>();
-const threadById = new Map<string, string>();
-let onDisableHandler: (() => void) | null = null;
-
-function loadConfig(): void {
-  if (!existsSync(CONFIG_PATH)) return;
-  try {
-    const raw = JSON.parse(readFileSync(CONFIG_PATH, "utf8")) as Partial<DiscordConfig>;
-    if (raw.siteId && raw.guildId && raw.channelId && raw.webhookUrl) {
-      config = {
-        siteId: raw.siteId,
-        guildId: raw.guildId,
-        channelId: raw.channelId,
-        webhookUrl: raw.webhookUrl,
-        origins: raw.origins ?? [],
-      };
-    }
-  } catch (e) {
-    console.error("[discord:config] failed to load", e);
-  }
-}
-
-function saveConfig(): void {
-  if (!config) return;
-  mkdirSync(dirname(CONFIG_PATH), { recursive: true });
-  writeFileSync(CONFIG_PATH, JSON.stringify(config, null, 2));
-}
-
-function clearConfig(): void {
-  config = null;
-  threadByName.clear();
-  threadById.clear();
-  if (existsSync(CONFIG_PATH)) unlinkSync(CONFIG_PATH);
-}
-
-function newSiteId(): string {
-  return `dc_${nanoid(12)}`;
-}
-
-function normalizeOrigin(s: string): string {
-  return s.trim().toLowerCase().replace(/\/$/, "");
-}
-
-export function setOnDisable(fn: () => void): void {
-  onDisableHandler = fn;
-}
-
-
-async function api(path: string, init: RequestInit = {}): Promise<Response> {
-  return fetch(`${API}${path}`, {
-    ...init,
-    headers: {
-      Authorization: `Bot ${BOT_TOKEN}`,
-      "Content-Type": "application/json",
-      ...(init.headers ?? {}),
-    },
-  });
-}
-
-async function loadActiveThreads(): Promise<void> {
-  if (!config) return;
-  const res = await api(`/guilds/${config.guildId}/threads/active`);
-  if (!res.ok) return;
-  const data = (await res.json()) as { threads: Array<{ id: string; name: string; parent_id: string }> };
-  for (const t of data.threads) {
-    if (t.parent_id !== config.channelId) continue;
-    threadByName.set(t.name, t.id);
-    threadById.set(t.id, t.name);
-  }
-}
-
-async function ensureThread(name: string): Promise<string> {
-  if (!config) throw new Error("discord not configured");
-  const cached = threadByName.get(name);
-  if (cached) return cached;
-  const res = await api(`/channels/${config.channelId}/threads`, {
-    method: "POST",
-    body: JSON.stringify({ name, type: 11, auto_archive_duration: 1440 }),
-  });
-  if (!res.ok) throw new Error(`thread create failed: ${res.status} ${await res.text()}`);
-  const thread = (await res.json()) as { id: string };
-  threadByName.set(name, thread.id);
-  threadById.set(thread.id, name);
-  return thread.id;
-}
-
-async function createWebhook(channelId: string): Promise<{ id: string; token: string; url: string }> {
-  const res = await api(`/channels/${channelId}/webhooks`, {
-    method: "POST",
-    body: JSON.stringify({ name: "danro-chat" }),
-  });
-  if (!res.ok) throw new Error(`webhook create failed: ${res.status} ${await res.text()}`);
-  const wh = (await res.json()) as { id: string; token: string };
-  return { ...wh, url: `https://discord.com/api/webhooks/${wh.id}/${wh.token}` };
-}
-
-async function respondInteraction(id: string, token: string, content: string): Promise<void> {
-  await fetch(`${API}/interactions/${id}/${token}/callback`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ type: 4, data: { content, flags: 64 } }),
-  });
-}
-
-type InteractionOption = {
-  name: string;
-  type: number;
-  value?: string;
-  options?: InteractionOption[];
-};
-
-type InteractionData = {
+export type InteractionData = {
   id: string;
   token: string;
   type: number;
   guild_id?: string;
-  data?: { name: string; options?: InteractionOption[] };
+  member?: { permissions?: string };
+  data?: {
+    name: string;
+    options?: Array<{
+      name: string;
+      type: number;
+      value?: string;
+      options?: Array<{ name: string; type: number; value?: string }>;
+    }>;
+  };
 };
 
-function embedSnippet(siteId: string): string {
-  return [
-    "埋め込みコード:",
-    "```html",
-    `<danro-talk ws-url="wss://your-server" site-id="${siteId}"></danro-talk>`,
-    "```",
-    "**siteId** は HTML 上に公開されます。漏洩したら `/danro rotate-id` で再発行できます。",
-    "ドメイン制限したい場合は `/danro set-origin example.com` で設定してください。",
-  ].join("\n");
-}
+const DISCORD_API = "https://discord.com/api/v10";
+const DISCORD_GATEWAY = "https://gateway.discord.gg/?v=10&encoding=json";
 
-async function handleInteraction(d: InteractionData): Promise<void> {
-  if (d.type !== 2 || d.data?.name !== "danro") return;
-  const sub = d.data.options?.[0];
-  if (!sub) return;
+// Gateway opcodes
+const GW_DISPATCH = 0;
+const GW_HEARTBEAT = 1;
+const GW_IDENTIFY = 2;
+const GW_RECONNECT = 7;
+const GW_INVALID_SESSION = 9;
+const GW_HELLO = 10;
 
-  if (sub.name === "set-channel") {
-    const channelId = sub.options?.find((o) => o.name === "channel")?.value;
-    if (!channelId || !d.guild_id) {
-      await respondInteraction(d.id, d.token, "チャンネルを指定してください。");
-      return;
-    }
-    try {
-      const webhook = await createWebhook(channelId);
-      const siteId = config?.guildId === d.guild_id ? config.siteId : newSiteId();
-      const origins = config?.guildId === d.guild_id ? config.origins : [];
-      config = { siteId, guildId: d.guild_id, channelId, webhookUrl: webhook.url, origins };
-      saveConfig();
-      threadByName.clear();
-      threadById.clear();
-      await loadActiveThreads();
-      await respondInteraction(
-        d.id,
-        d.token,
-        `✅ <#${channelId}> に設定しました。\n\nsiteId: \`${siteId}\`\n\n${embedSnippet(siteId)}`,
-      );
-    } catch (e) {
-      await respondInteraction(d.id, d.token, `❌ 失敗しました: ${e instanceof Error ? e.message : String(e)}`);
-    }
-    return;
-  }
+// Gateway intent bits
+const INTENT_GUILDS = 1 << 0;
+const INTENT_GUILD_MESSAGES = 1 << 9;
+const INTENT_MESSAGE_CONTENT = 1 << 15;
 
-  if (sub.name === "show") {
-    if (config && config.guildId === d.guild_id) {
-      const originsLine = config.origins.length > 0 ? config.origins.join(", ") : "（未設定 — どこからでも接続可）";
-      await respondInteraction(
-        d.id,
-        d.token,
-        [
-          `**channel**: <#${config.channelId}>`,
-          `**siteId**: \`${config.siteId}\``,
-          `**origins**: ${originsLine}`,
-        ].join("\n"),
-      );
-    } else {
-      await respondInteraction(d.id, d.token, "未設定です。`/danro set-channel` で設定してください。");
-    }
-    return;
-  }
+// Interaction / response constants
+const INTERACTION_APPLICATION_COMMAND = 2;
+const RESPONSE_CHANNEL_MESSAGE = 4;
+const FLAG_EPHEMERAL = 64;
 
-  if (sub.name === "rotate-id") {
-    if (!config || config.guildId !== d.guild_id) {
-      await respondInteraction(d.id, d.token, "未設定です。");
-      return;
-    }
-    const siteId = newSiteId();
-    config = { ...config, siteId };
-    saveConfig();
-    onDisableHandler?.();
-    await respondInteraction(
-      d.id,
-      d.token,
-      `✅ siteId を再発行しました: \`${siteId}\`\n旧 siteId は無効、既存の widget セッションは切断されました。\n\n${embedSnippet(siteId)}`,
-    );
-    return;
-  }
+// Thread constants
+const THREAD_TYPE_PUBLIC = 11;
+const THREAD_ARCHIVE_24H = 1440; // minutes
 
-  if (sub.name === "set-origin") {
-    if (!config || config.guildId !== d.guild_id) {
-      await respondInteraction(d.id, d.token, "先に `/danro set-channel` で設定してください。");
-      return;
-    }
-    const value = sub.options?.find((o) => o.name === "domains")?.value ?? "";
-    const list = value
-      .split(",")
-      .map((s) => normalizeOrigin(s))
-      .filter((s) => s.length > 0);
-    config = { ...config, origins: list };
-    saveConfig();
-    if (list.length === 0) {
-      await respondInteraction(d.id, d.token, "✅ ドメイン制限を解除しました（どこからでも接続可）。");
-    } else {
-      await respondInteraction(d.id, d.token, `✅ 許可ドメイン: ${list.join(", ")}`);
-    }
-    return;
-  }
+// Permission flags
+const PERM_MANAGE_GUILD = "32";
 
-  if (sub.name === "disable") {
-    if (config && config.guildId === d.guild_id) {
-      clearConfig();
-      onDisableHandler?.();
-      await respondInteraction(d.id, d.token, "✅ 無効化しました。既存の widget セッションは切断されました。");
-    } else {
-      await respondInteraction(d.id, d.token, "このサーバには設定がありません。");
-    }
-    return;
-  }
-}
+const SITE_ID_LEN = 12;
+const HISTORY_LIMIT = 50;
+const RECONNECT_DELAY_MS = 5000;
 
-const COMMAND_DEFS = [
+const DISCORD_COMMAND_DEFS = [
   {
     name: "danro",
     description: "danro-chat configuration",
-    default_member_permissions: "32", // MANAGE_GUILD
+    default_member_permissions: PERM_MANAGE_GUILD,
     options: [
       {
         name: "set-channel",
         description: "Set the parent channel for visitor conversations",
         type: 1,
-        options: [
-          { name: "channel", description: "Parent text channel", type: 7, required: true, channel_types: [0] },
-        ],
+        options: [{ name: "channel", description: "Parent text channel", type: 7, required: true, channel_types: [0] }],
       },
       { name: "show", description: "Show current configuration", type: 1 },
       { name: "rotate-id", description: "Rotate the siteId (invalidates old widget embeds)", type: 1 },
@@ -282,69 +84,288 @@ const COMMAND_DEFS = [
         name: "set-origin",
         description: "Restrict by domain (comma-separated; empty to clear)",
         type: 1,
-        options: [
-          { name: "domains", description: "e.g. https://example.com,https://example.org", type: 3, required: true },
-        ],
+        options: [{ name: "domains", description: "e.g. https://example.com,https://example.org", type: 3, required: true }],
       },
       { name: "disable", description: "Disable visitor chat in this server", type: 1 },
     ],
   },
 ];
 
-const registeredGuilds = new Set<string>();
-const registeringGuilds = new Set<string>();
-let globalCleared = false;
-
-async function clearGlobalCommandsOnce(): Promise<void> {
-  if (!botUserId || globalCleared) return;
-  globalCleared = true;
-  const res = await api(`/applications/${botUserId}/commands`, {
-    method: "PUT",
-    body: JSON.stringify([]),
-  });
-  if (!res.ok) console.error("[discord:commands] failed to clear global", res.status);
+function discordDisplayName(m: DiscordMessage): string {
+  return m.member?.nick ?? m.author?.global_name ?? m.author?.username ?? "unknown";
 }
 
-async function registerCommandsForGuild(guildId: string): Promise<void> {
-  if (!botUserId || registeredGuilds.has(guildId) || registeringGuilds.has(guildId)) return;
-  registeringGuilds.add(guildId);
-  try {
-    const res = await api(`/applications/${botUserId}/guilds/${guildId}/commands`, {
-      method: "PUT",
-      body: JSON.stringify(COMMAND_DEFS),
-    });
-    if (!res.ok) {
-      console.error("[discord:commands]", guildId, res.status, await res.text());
-    } else {
-      registeredGuilds.add(guildId);
-      console.log(`[discord] slash commands registered for guild ${guildId}`);
+export class DiscordAdapter {
+  private discordConfig: DiscordConfig | null = null;
+  private dgWs: WebSocket | null = null;
+  private dgSeq: number | null = null;
+  private dgBotUserId: string | null = null;
+  private dgHeartbeat: ReturnType<typeof setInterval> | null = null;
+  private dgThreadByName = new Map<string, string>();
+  private dgThreadById = new Map<string, string>();
+  private dgRegistered = new Set<string>();
+  private dgGlobalCleared = false;
+
+  constructor(
+    private env: Env,
+    private storage: DurableObjectStorage,
+    private onMessage: OnAgentMessage,
+    private onDisable: () => void,
+    private onTopicRename: (oldTopic: string, newTopic: string) => void,
+  ) {}
+
+  async init(): Promise<void> {
+    this.discordConfig = (await this.storage.get<DiscordConfig>("discord:config")) ?? null;
+    const threads = (await this.storage.get<Record<string, string>>("discord:threads")) ?? {};
+    for (const [name, id] of Object.entries(threads)) {
+      this.dgThreadByName.set(name, id);
+      this.dgThreadById.set(id, name);
     }
-  } finally {
-    registeringGuilds.delete(guildId);
   }
-}
 
-function connectGateway(onMessage: (m: DiscordMessage) => void): void {
-  const ws = new WSClient(GATEWAY);
-  let heartbeat: NodeJS.Timeout | null = null;
-  let seq: number | null = null;
+  get config(): DiscordConfig | null {
+    return this.discordConfig;
+  }
 
-  const stopHeartbeat = (): void => {
-    if (heartbeat) clearInterval(heartbeat);
-    heartbeat = null;
-  };
+  validate(siteId: string | undefined, origin: string | undefined): string | null {
+    if (!this.discordConfig) return "service_unavailable";
+    if (!siteId || siteId !== this.discordConfig.siteId) return "invalid_site_id";
+    if (this.discordConfig.origins.length > 0) {
+      if (!origin) return "origin_required";
+      if (!this.discordConfig.origins.includes(normalizeOrigin(origin))) return "origin_not_allowed";
+    }
+    return null;
+  }
 
-  ws.on("message", async (raw) => {
-    const payload = JSON.parse(raw.toString()) as { op: number; d: any; s: number | null; t: string | null };
-    if (payload.s !== null && payload.s !== undefined) seq = payload.s;
+  start(): void {
+    if (this.env.DISCORD_BOT_TOKEN && !this.dgWs) {
+      this.dgConnect();
+    }
+  }
 
-    if (payload.op === 10) {
-      heartbeat = setInterval(() => ws.send(JSON.stringify({ op: 1, d: seq })), payload.d.heartbeat_interval);
-      const intents = (1 << 0) | (1 << 9) | (1 << 15);
+  stop(): void {
+    if (this.dgHeartbeat) {
+      clearInterval(this.dgHeartbeat);
+      this.dgHeartbeat = null;
+    }
+    if (this.dgWs) {
+      try {
+        this.dgWs.close();
+      } catch {}
+      this.dgWs = null;
+    }
+  }
+
+  async send(topic: string, nickname: string, text: string): Promise<void> {
+    if (!this.discordConfig) throw new Error("discord not configured");
+    const threadId = await this.dgEnsureThread(topic);
+    const url = new URL(this.discordConfig.webhookUrl);
+    url.searchParams.set("thread_id", threadId);
+    const res = await fetch(url.toString(), {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ username: `danro ${nickname}`, content: text, allowed_mentions: { parse: [] } }),
+    });
+    if (!res.ok) throw new Error(`webhook send: ${res.status} ${await res.text()}`);
+  }
+
+  async sendSystem(topic: string, text: string): Promise<void> {
+    const threadId = await this.dgEnsureThread(topic);
+    const res = await this.dgApi(`/channels/${threadId}/messages`, {
+      method: "POST",
+      body: JSON.stringify({ content: text }),
+    });
+    if (!res.ok) throw new Error(`discord sendSystem: ${res.status} ${await res.text()}`);
+  }
+
+  async fetchHistory(topic: string): Promise<HistoryMessage[]> {
+    const threadId = this.dgThreadByName.get(topic);
+    if (!threadId) return [];
+    const res = await this.dgApi(`/channels/${threadId}/messages?limit=${HISTORY_LIMIT}`);
+    if (!res.ok) return [];
+    const messages = await res.json() as DiscordMessage[];
+    return messages.reverse().map((m) => ({
+      from: (m.webhook_id ? "visitor" : "agent") as "visitor" | "agent",
+      text: m.content,
+      ts: new Date(m.timestamp).getTime(),
+      senderName: discordDisplayName(m),
+    }));
+  }
+
+  async fetchEmojis(): Promise<Record<string, string>> {
+    if (!this.discordConfig) return {};
+    const res = await this.dgApi(`/guilds/${this.discordConfig.guildId}/emojis`);
+    if (!res.ok) return {};
+    const data = await res.json() as Array<{ id: string; name: string; animated: boolean }>;
+    const out: Record<string, string> = {};
+    for (const e of data) out[e.name] = `https://cdn.discordapp.com/emojis/${e.id}.${e.animated ? "gif" : "png"}`;
+    return out;
+  }
+
+  async handleInteraction(d: InteractionData): Promise<void> {
+    if (d.type !== INTERACTION_APPLICATION_COMMAND || d.data?.name !== "danro") return;
+    const sub = d.data.options?.[0];
+    if (!sub) return;
+
+    const respond = (content: string) =>
+      fetch(`${DISCORD_API}/interactions/${d.id}/${d.token}/callback`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ type: RESPONSE_CHANNEL_MESSAGE, data: { content, flags: FLAG_EPHEMERAL } }),
+      });
+
+    const memberPerms = BigInt(d.member?.permissions ?? "0");
+    if ((memberPerms & BigInt(PERM_MANAGE_GUILD)) === 0n) {
+      await respond("This command requires the Manage Guild permission.");
+      return;
+    }
+
+    if (sub.name === "set-channel") {
+      const channelId = sub.options?.find((o) => o.name === "channel")?.value;
+      if (!channelId || !d.guild_id) {
+        await respond("Please specify a channel.");
+        return;
+      }
+      try {
+        const whRes = await this.dgApi(`/channels/${channelId}/webhooks`, {
+          method: "POST",
+          body: JSON.stringify({ name: "danro-chat" }),
+        });
+        if (!whRes.ok) throw new Error(`${whRes.status} ${await whRes.text()}`);
+        const wh = await whRes.json() as { id: string; token: string };
+        const siteId = this.discordConfig?.guildId === d.guild_id
+          ? this.discordConfig.siteId
+          : `dc_${nanoid(SITE_ID_LEN)}`;
+        const origins = this.discordConfig?.guildId === d.guild_id
+          ? this.discordConfig.origins
+          : [];
+        this.discordConfig = {
+          siteId,
+          guildId: d.guild_id,
+          channelId,
+          webhookUrl: `https://discord.com/api/webhooks/${wh.id}/${wh.token}`,
+          origins,
+        };
+        await this.storage.put("discord:config", this.discordConfig);
+        this.dgThreadByName.clear();
+        this.dgThreadById.clear();
+        await this.dgLoadThreads();
+        await respond(
+          `✅ Set to <#${channelId}>.\n\nsiteId: \`${siteId}\`\n\nEmbed code:\n\`\`\`html\n<danro-talk ws-url="wss://your-worker.workers.dev" site-id="${siteId}"></danro-talk>\n\`\`\``,
+        );
+      } catch (e) {
+        await respond(`❌ Failed: ${e instanceof Error ? e.message : String(e)}`);
+      }
+      return;
+    }
+
+    if (sub.name === "show") {
+      const cfg = this.discordConfig;
+      if (cfg !== null && cfg.guildId === d.guild_id) {
+        const origs = cfg.origins.length > 0 ? cfg.origins.join(", ") : "(none — all origins allowed)";
+        await respond([
+          `**channel**: <#${cfg.channelId}>`,
+          `**siteId**: \`${cfg.siteId}\``,
+          `**origins**: ${origs}`,
+        ].join("\n"));
+      } else {
+        await respond("Not configured. Run `/danro set-channel` first.");
+      }
+      return;
+    }
+
+    if (sub.name === "rotate-id") {
+      if (!this.discordConfig || this.discordConfig.guildId !== d.guild_id) {
+        await respond("Not configured.");
+        return;
+      }
+      const siteId = `dc_${nanoid(SITE_ID_LEN)}`;
+      this.discordConfig = { ...this.discordConfig, siteId };
+      await this.storage.put("discord:config", this.discordConfig);
+      this.onDisable();
+      await respond(`✅ Rotated siteId: \`${siteId}\`. Old siteId is invalid; existing sessions were disconnected.`);
+      return;
+    }
+
+    if (sub.name === "set-origin") {
+      if (!this.discordConfig || this.discordConfig.guildId !== d.guild_id) {
+        await respond("Not configured. Run `/danro set-channel` first.");
+        return;
+      }
+      const list = parseOrigins(sub.options?.find((o) => o.name === "domains")?.value ?? "");
+      this.discordConfig = { ...this.discordConfig, origins: list };
+      await this.storage.put("discord:config", this.discordConfig);
+      await respond(list.length === 0 ? "✅ Origin restriction cleared." : `✅ Allowed origins: ${list.join(", ")}`);
+      return;
+    }
+
+    if (sub.name === "disable") {
+      if (this.discordConfig?.guildId === d.guild_id) {
+        this.discordConfig = null;
+        await this.storage.delete("discord:config");
+        this.dgThreadByName.clear();
+        this.dgThreadById.clear();
+        this.onDisable();
+        await respond("✅ Disabled. Existing widget sessions were disconnected.");
+      } else {
+        await respond("No configuration found for this server.");
+      }
+    }
+  }
+
+  private dgApi(path: string, init: RequestInit = {}): Promise<Response> {
+    return fetch(`${DISCORD_API}${path}`, {
+      ...init,
+      headers: {
+        Authorization: `Bot ${this.env.DISCORD_BOT_TOKEN}`,
+        "Content-Type": "application/json",
+        ...(init.headers ?? {}),
+      },
+    });
+  }
+
+  private dgConnect(): void {
+    fetch(DISCORD_GATEWAY, { headers: { Upgrade: "websocket" } }).then((resp) => {
+      const ws = resp.webSocket;
+      if (!ws) {
+        console.error("[discord:gateway] no webSocket");
+        return;
+      }
+      ws.accept();
+      this.dgWs = ws;
+
+      ws.addEventListener("message", (event) => {
+        this.dgOnMessage(ws, event.data as string).catch(console.error);
+      });
+      ws.addEventListener("close", () => {
+        this.dgWs = null;
+        if (this.dgHeartbeat) {
+          clearInterval(this.dgHeartbeat);
+          this.dgHeartbeat = null;
+        }
+        if (this.env.DISCORD_BOT_TOKEN) {
+          setTimeout(() => this.dgConnect(), RECONNECT_DELAY_MS);
+        }
+      });
+      ws.addEventListener("error", (e) => console.error("[discord:gateway]", e));
+    }).catch((e) => console.error("[discord:gateway:connect]", e));
+  }
+
+  private async dgOnMessage(ws: WebSocket, raw: string): Promise<void> {
+    const p = JSON.parse(raw) as { op: number; d: unknown; s: number | null; t: string | null };
+    if (p.s !== null && p.s !== undefined) this.dgSeq = p.s;
+
+    if (p.op === GW_HELLO) {
+      const d = p.d as { heartbeat_interval: number };
+      this.dgHeartbeat = setInterval(
+        () => ws.send(JSON.stringify({ op: GW_HEARTBEAT, d: this.dgSeq })),
+        d.heartbeat_interval,
+      );
+      const intents = INTENT_GUILDS | INTENT_GUILD_MESSAGES | INTENT_MESSAGE_CONTENT;
       ws.send(JSON.stringify({
-        op: 2,
+        op: GW_IDENTIFY,
         d: {
-          token: BOT_TOKEN,
+          token: this.env.DISCORD_BOT_TOKEN,
           intents,
           properties: { os: "linux", browser: "danro-chat", device: "danro-chat" },
         },
@@ -352,125 +373,103 @@ function connectGateway(onMessage: (m: DiscordMessage) => void): void {
       return;
     }
 
-    if (payload.op === 0) {
-      if (payload.t === "READY") {
-        botUserId = payload.d.user?.id ?? null;
-        await clearGlobalCommandsOnce();
-        const guilds = (payload.d.guilds ?? []) as Array<{ id: string; unavailable?: boolean }>;
-        for (const g of guilds) {
-          if (!g.unavailable) await registerCommandsForGuild(g.id);
+    if (p.op === GW_DISPATCH) {
+      if (p.t === "READY") {
+        const d = p.d as { user?: { id: string }; guilds?: Array<{ id: string; unavailable?: boolean }> };
+        this.dgBotUserId = d.user?.id ?? null;
+        if (!this.dgGlobalCleared && this.dgBotUserId) {
+          this.dgGlobalCleared = true;
+          await this.dgApi(`/applications/${this.dgBotUserId}/commands`, { method: "PUT", body: JSON.stringify([]) });
         }
-        await loadActiveThreads();
+        for (const g of d.guilds ?? []) if (!g.unavailable) await this.dgRegisterCommands(g.id);
+        await this.dgLoadThreads();
       }
-      if (payload.t === "GUILD_CREATE") {
-        const g = payload.d as { id: string; unavailable?: boolean };
-        if (!g.unavailable) await registerCommandsForGuild(g.id);
+      if (p.t === "GUILD_CREATE") {
+        const g = p.d as { id: string; unavailable?: boolean };
+        if (!g.unavailable) await this.dgRegisterCommands(g.id);
       }
-      if (payload.t === "MESSAGE_CREATE") onMessage(payload.d as DiscordMessage);
-      if (payload.t === "INTERACTION_CREATE") {
-        handleInteraction(payload.d as InteractionData).catch((e) => console.error("[discord:interaction]", e));
+      if (p.t === "MESSAGE_CREATE") {
+        const msg = p.d as DiscordMessage;
+        if (!this.discordConfig || msg.webhook_id || msg.author?.bot) return;
+        if (this.dgBotUserId && msg.author?.id === this.dgBotUserId) return;
+        const topic = this.dgThreadById.get(msg.channel_id);
+        if (!topic) return;
+        this.onMessage(topic, discordDisplayName(msg), msg.content ?? "");
       }
-      if (payload.t === "THREAD_CREATE") {
-        const t = payload.d as { id: string; name: string; parent_id: string };
-        if (config && t.parent_id === config.channelId) {
-          threadByName.set(t.name, t.id);
-          threadById.set(t.id, t.name);
+      if (p.t === "INTERACTION_CREATE") {
+        await this.handleInteraction(p.d as InteractionData);
+      }
+      if (p.t === "THREAD_CREATE") {
+        const t = p.d as { id: string; name: string; parent_id: string };
+        if (this.discordConfig && t.parent_id === this.discordConfig.channelId) {
+          this.dgThreadByName.set(t.name, t.id);
+          this.dgThreadById.set(t.id, t.name);
+          await this.dgSaveThreads();
+        }
+      }
+      if (p.t === "THREAD_UPDATE") {
+        const t = p.d as { id: string; name: string; parent_id: string };
+        if (this.discordConfig && t.parent_id === this.discordConfig.channelId) {
+          const oldName = this.dgThreadById.get(t.id);
+          if (oldName && oldName !== t.name) {
+            this.dgThreadByName.delete(oldName);
+            this.dgThreadByName.set(t.name, t.id);
+            this.dgThreadById.set(t.id, t.name);
+            await this.dgSaveThreads();
+            this.onTopicRename(oldName, t.name);
+          }
         }
       }
       return;
     }
 
-    if (payload.op === 7 || payload.op === 9) {
-      ws.close();
+    if (p.op === GW_RECONNECT || p.op === GW_INVALID_SESSION) ws.close();
+  }
+
+  private async dgLoadThreads(): Promise<void> {
+    if (!this.discordConfig) return;
+    const res = await this.dgApi(`/guilds/${this.discordConfig.guildId}/threads/active`);
+    if (!res.ok) return;
+    const data = await res.json() as { threads: Array<{ id: string; name: string; parent_id: string }> };
+    for (const t of data.threads) {
+      if (t.parent_id !== this.discordConfig.channelId) continue;
+      this.dgThreadByName.set(t.name, t.id);
+      this.dgThreadById.set(t.id, t.name);
     }
-  });
+    await this.dgSaveThreads();
+  }
 
-  ws.on("close", () => {
-    stopHeartbeat();
-    setTimeout(() => connectGateway(onMessage), 5000);
-  });
+  private async dgSaveThreads(): Promise<void> {
+    const threads: Record<string, string> = {};
+    for (const [name, id] of this.dgThreadByName) threads[name] = id;
+    await this.storage.put("discord:threads", threads);
+  }
 
-  ws.on("error", (e) => {
-    console.error("[discord:gateway]", e);
-  });
-}
-
-loadConfig();
-
-export const discordAdapter: Adapter = {
-  target: "discord",
-
-  async send(topic, sender, text) {
-    if (!config) throw new Error("discord not configured");
-    const threadId = await ensureThread(topic);
-    const url = new URL(config.webhookUrl);
-    url.searchParams.set("thread_id", threadId);
-    const res = await fetch(url.toString(), {
+  private async dgEnsureThread(name: string): Promise<string> {
+    if (!this.discordConfig) throw new Error("discord not configured");
+    const cached = this.dgThreadByName.get(name);
+    if (cached) return cached;
+    const res = await this.dgApi(`/channels/${this.discordConfig.channelId}/threads`, {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        username: `danro ${sender.nickname}`,
-        content: text,
-        allowed_mentions: { parse: [] },
-      }),
+      body: JSON.stringify({ name, type: THREAD_TYPE_PUBLIC, auto_archive_duration: THREAD_ARCHIVE_24H }),
     });
-    if (!res.ok) throw new Error(`webhook send failed: ${res.status} ${await res.text()}`);
-  },
+    if (!res.ok) throw new Error(`thread create: ${res.status} ${await res.text()}`);
+    const thread = await res.json() as { id: string };
+    this.dgThreadByName.set(name, thread.id);
+    this.dgThreadById.set(thread.id, name);
+    await this.dgSaveThreads();
+    return thread.id;
+  }
 
-  async fetchHistory(topic): Promise<HistoryMessage[]> {
-    const threadId = threadByName.get(topic);
-    if (!threadId) return [];
-    const res = await api(`/channels/${threadId}/messages?limit=50`);
-    if (!res.ok) return [];
-    const messages = (await res.json()) as DiscordMessage[];
-    return messages.reverse().map((m) => ({
-      from: m.webhook_id ? ("visitor" as const) : ("agent" as const),
-      text: m.content,
-      ts: new Date(m.timestamp).getTime(),
-      senderName: displayNameOf(m),
-    }));
-  },
-
-  async subscribe(onMessage: (m: InboundMessage) => void): Promise<void> {
-    if (!BOT_TOKEN) {
-      console.warn("[discord] BOT_TOKEN missing — skipping subscribe");
-      return;
-    }
-    connectGateway((msg) => {
-      if (!config) return;
-      if (msg.webhook_id) return;
-      if (msg.author?.bot) return;
-      if (botUserId && msg.author?.id === botUserId) return;
-      const topic = threadById.get(msg.channel_id);
-      if (!topic) return;
-      onMessage({
-        topic,
-        senderName: displayNameOf(msg),
-        text: msg.content ?? "",
-      });
+  private async dgRegisterCommands(guildId: string): Promise<void> {
+    if (!this.dgBotUserId || this.dgRegistered.has(guildId)) return;
+    const res = await this.dgApi(`/applications/${this.dgBotUserId}/guilds/${guildId}/commands`, {
+      method: "PUT",
+      body: JSON.stringify(DISCORD_COMMAND_DEFS),
     });
-  },
-
-  validateHello(siteId, origin) {
-    if (!config) return { ok: false, reason: "service_unavailable" };
-    if (!siteId || siteId !== config.siteId) return { ok: false, reason: "invalid_site_id" };
-    if (config.origins.length > 0) {
-      if (!origin) return { ok: false, reason: "origin_required" };
-      if (!config.origins.includes(normalizeOrigin(origin))) return { ok: false, reason: "origin_not_allowed" };
+    if (res.ok) {
+      this.dgRegistered.add(guildId);
+      console.log(`[discord] commands registered for ${guildId}`);
     }
-    return { ok: true };
-  },
-
-  async emojis(): Promise<Record<string, string>> {
-    if (!config) return {};
-    const res = await api(`/guilds/${config.guildId}/emojis`);
-    if (!res.ok) return {};
-    const data = (await res.json()) as Array<{ id: string; name: string; animated: boolean }>;
-    const out: Record<string, string> = {};
-    for (const e of data) {
-      const ext = e.animated ? "gif" : "png";
-      out[e.name] = `https://cdn.discordapp.com/emojis/${e.id}.${ext}`;
-    }
-    return out;
-  },
-};
+  }
+}
