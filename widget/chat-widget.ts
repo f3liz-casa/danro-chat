@@ -1,4 +1,8 @@
+import * as v from "valibot";
+
 type WelcomeFrame = { type: "welcome"; visitorId: string; nickname: string | null; email: string | null; returning: boolean; hasHistory: boolean; emojis: Record<string, string> };
+
+const EmailSchema = v.pipe(v.string(), v.trim(), v.email());
 type MessageFrame = { type: "message"; from: "visitor" | "agent"; text: string; ts: number; senderName?: string };
 type HistoryEndFrame = { type: "history_end" };
 type NicknameUpdatedFrame = { type: "nickname_updated"; nickname: string | null; email: string | null };
@@ -23,6 +27,7 @@ type Strings = {
   hintHtml: string;
   sendButton: string;
   introHtml: string;
+  emailInvalid: string;
   statusLoadingHistory: string;
   statusHistoryEnd: string;
   statusDisconnected: string;
@@ -46,9 +51,10 @@ const STRINGS: Record<Locale, Strings> = {
     sendButton: "送信",
     introHtml: `
       <b>ご相談の内容を、ひとまとめにして</b>送ってください。<br>
-      担当者が見つけしだい、ゆっくり考えてお返事します。<br>
+      ゆっくり読んで、しっかりお返事します。<br>
       （数時間〜1日ほどかかることがあります）
     `,
+    emailInvalid: "正しいメールアドレスを入力してください。",
     statusLoadingHistory: "これまでのやりとりを読み込んでいます…",
     statusHistoryEnd: "ここまでの履歴です",
     statusDisconnected: "つながりが切れました",
@@ -73,6 +79,7 @@ const STRINGS: Record<Locale, Strings> = {
       담당자가 확인하는 대로, 천천히 잘 생각해서 답장 드릴게요.<br>
       (몇 시간에서 하루 정도 걸릴 수 있어요)
     `,
+    emailInvalid: "올바른 이메일 주소를 입력해 주세요.",
     statusLoadingHistory: "이전 대화를 불러오고 있어요…",
     statusHistoryEnd: "여기까지가 이전 대화예요",
     statusDisconnected: "연결이 끊어졌어요",
@@ -352,14 +359,6 @@ class DanroTalk extends HTMLElement {
     this.entryEmail = root.getElementById("entry-email") as HTMLInputElement;
     this.entryButton = root.getElementById("entry-button") as HTMLButtonElement;
 
-    const onEnterSubmit = (e: KeyboardEvent): void => {
-      if (e.key === "Enter") {
-        e.preventDefault();
-        this.submitEntry();
-      }
-    };
-    this.entryInput.addEventListener("keydown", onEnterSubmit);
-    this.entryEmail.addEventListener("keydown", onEnterSubmit);
     const tryEntrySubmit = (e: Event): void => {
       e.preventDefault();
       const wasFocused = this.shadowRoot?.activeElement === this.entryInput;
@@ -369,6 +368,9 @@ class DanroTalk extends HTMLElement {
     this.entryButton.addEventListener("mousedown", tryEntrySubmit);
     this.entryButton.addEventListener("mouseup", tryEntrySubmit);
     this.entryButton.addEventListener("click", tryEntrySubmit);
+    this.entryButton.addEventListener("keyup", (e) => {
+      if (e.code === "Enter") tryEntrySubmit(e);
+    });
     this.entryButton.addEventListener("touchstart", tryEntrySubmit, { passive: false });
 
     const form = root.getElementById("form") as HTMLFormElement;
@@ -389,6 +391,9 @@ class DanroTalk extends HTMLElement {
     this.button.addEventListener("mousedown", trySubmit);
     this.button.addEventListener("mouseup", trySubmit);
     this.button.addEventListener("click", trySubmit);
+    this.button.addEventListener("keyup", (e) => {
+      if (e.code === "Enter") trySubmit(e);
+    });
     this.button.addEventListener("touchstart", trySubmit, { passive: false });
     const syncReplicated = (): void => {
       this.inputWrap.dataset.replicatedValue = this.input.value;
@@ -396,7 +401,7 @@ class DanroTalk extends HTMLElement {
     this.input.addEventListener("input", syncReplicated);
     this.input.addEventListener("compositionend", syncReplicated);
     this.input.addEventListener("keydown", (e) => {
-      if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) {
+      if (e.code === "Enter" && (e.metaKey || e.ctrlKey)) {
         e.preventDefault();
         this.submit();
       }
@@ -423,6 +428,13 @@ class DanroTalk extends HTMLElement {
     const nickname = this.entryInput.value.trim();
     if (!nickname || !this.ws || this.ws.readyState !== WebSocket.OPEN) return;
     const email = this.entryEmail.value.trim();
+    if (email && !v.safeParse(EmailSchema, email).success) {
+      this.entryEmail.setCustomValidity(this.strings.emailInvalid);
+      this.entryEmail.reportValidity();
+      this.entryEmail.setCustomValidity("");
+      this.entryEmail.focus();
+      return;
+    }
     this.ws.send(JSON.stringify({
       type: "set_nickname",
       nickname,
