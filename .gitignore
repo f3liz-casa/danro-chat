@@ -1,0 +1,8 @@
+node_modules/
+dist/
+widget/chat-widget.js
+data/
+.env
+.env.local
+*.log
+.DS_Store

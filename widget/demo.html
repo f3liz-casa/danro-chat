@@ -1,0 +1,27 @@
+<!doctype html>
+<html lang="ja">
+  <head>
+    <meta charset="utf-8" />
+    <title>danro-talk demo</title>
+    <style>
+      body { font-family: -apple-system, sans-serif; padding: 40px; background: #f4f2ed; }
+      h1 { font-weight: 400; color: #2b2a26; }
+      .row { display: flex; gap: 24px; align-items: flex-start; flex-wrap: wrap; }
+      .col h2 { font-weight: 400; font-size: 14px; color: #6a6760; margin: 0 0 8px; }
+    </style>
+  </head>
+  <body>
+    <h1>danro-talk widget</h1>
+    <div class="row">
+      <div class="col">
+        <h2>日本語 (ja)</h2>
+        <danro-talk ws-url="ws://localhost:3000" lang="ja"></danro-talk>
+      </div>
+      <div class="col">
+        <h2>한국어 (ko) → Discord</h2>
+        <danro-talk ws-url="ws://localhost:3000" lang="ko" target="discord"></danro-talk>
+      </div>
+    </div>
+    <script type="module" src="./chat-widget.js"></script>
+  </body>
+</html>
