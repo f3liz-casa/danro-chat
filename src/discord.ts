@@ -21,11 +21,16 @@ type DiscordConfig = {
 type DiscordMessage = {
   id: string;
   channel_id: string;
-  author: { id: string; username: string; bot?: boolean };
+  author: { id: string; username: string; global_name?: string | null; bot?: boolean };
+  member?: { nick?: string | null };
   content: string;
   timestamp: string;
   webhook_id?: string;
 };
+
+function displayNameOf(m: DiscordMessage): string {
+  return m.member?.nick ?? m.author?.global_name ?? m.author?.username ?? "unknown";
+}
 
 let config: DiscordConfig | null = null;
 let botUserId: string | null = null;
@@ -422,7 +427,7 @@ export const discordAdapter: Adapter = {
       from: m.webhook_id ? ("visitor" as const) : ("agent" as const),
       text: m.content,
       ts: new Date(m.timestamp).getTime(),
-      senderName: m.author?.username ?? "unknown",
+      senderName: displayNameOf(m),
     }));
   },
 
@@ -440,7 +445,7 @@ export const discordAdapter: Adapter = {
       if (!topic) return;
       onMessage({
         topic,
-        senderName: msg.author?.username ?? "unknown",
+        senderName: displayNameOf(msg),
         text: msg.content ?? "",
       });
     });
