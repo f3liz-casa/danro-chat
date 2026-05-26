@@ -12,7 +12,7 @@ type ServerFrame = WelcomeFrame | MessageFrame | HistoryEndFrame | NicknameUpdat
 
 const STORAGE_KEY_BASE = "danro-talk:visitorId";
 
-type Locale = "ja" | "ko";
+type Locale = "ja" | "ko" | "en";
 
 type Strings = {
   headerTitle: string;
@@ -93,18 +93,51 @@ const STRINGS: Record<Locale, Strings> = {
     openLabel: "상담 열기",
     minimizeLabel: "최소화",
   },
+  en: {
+    headerTitle: "Chat",
+    nicknameSuffix: "",
+    entryTitle: "Hello",
+    entryQ: "What should we call you?",
+    entryHelp: "A nickname is fine.",
+    entryPlaceholder: "e.g. Sam",
+    entryEmailLabel: "We'll let you know when a reply arrives (optional)",
+    entryEmailPlaceholder: "you@example.com",
+    entryButton: "Start",
+    inputPlaceholder: "Write your message",
+    hintHtml: `<kbd>⌘/Ctrl + Enter</kbd> to send, <kbd>Enter</kbd> for newline`,
+    sendButton: "Send",
+    introHtml: `
+      <b>Please write what's on your mind in a single message.</b><br>
+      We'll read it carefully and reply.<br>
+      (It may take a few hours to a day.)
+    `,
+    emailInvalid: "Please enter a valid email address.",
+    statusLoadingHistory: "Loading earlier messages…",
+    statusHistoryEnd: "End of earlier messages",
+    statusDisconnected: "Connection lost",
+    statusError: (reason) => `Error: ${reason}`,
+    attrMissing: "ws-url attribute is required",
+    openLabel: "Open chat",
+    minimizeLabel: "Minimize",
+  },
 };
 
+function pickLocale(tag: string | null | undefined): Locale | null {
+  const s = tag?.toLowerCase();
+  if (!s) return null;
+  if (s.startsWith("ko")) return "ko";
+  if (s.startsWith("ja")) return "ja";
+  if (s.startsWith("en")) return "en";
+  return null;
+}
+
 function detectLocale(el: HTMLElement): Locale {
-  const attr = el.getAttribute("lang")?.toLowerCase();
-  if (attr?.startsWith("ko")) return "ko";
-  if (attr?.startsWith("ja")) return "ja";
-  const docLang = document.documentElement.lang?.toLowerCase();
-  if (docLang?.startsWith("ko")) return "ko";
-  if (docLang?.startsWith("ja")) return "ja";
-  const navLang = navigator.language?.toLowerCase() ?? "";
-  if (navLang.startsWith("ko")) return "ko";
-  return "ja";
+  return (
+    pickLocale(el.getAttribute("lang")) ??
+    pickLocale(document.documentElement.lang) ??
+    pickLocale(navigator.language) ??
+    "en"
+  );
 }
 
 const css = `
@@ -654,7 +687,7 @@ class DanroTalk extends HTMLElement {
     const d = new Date(ts);
     const now = new Date();
     const sameDay = d.toDateString() === now.toDateString();
-    const tag = this.locale === "ko" ? "ko-KR" : "ja-JP";
+    const tag = this.locale === "ko" ? "ko-KR" : this.locale === "en" ? "en-US" : "ja-JP";
     if (sameDay) {
       return d.toLocaleTimeString(tag, { hour: "2-digit", minute: "2-digit" });
     }
