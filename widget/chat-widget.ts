@@ -96,19 +96,18 @@ const STRINGS: Record<Locale, Strings> = {
   en: {
     headerTitle: "Chat",
     nicknameSuffix: "",
-    entryTitle: "Hello",
+    entryTitle: "Hi there",
     entryQ: "What should we call you?",
     entryHelp: "A nickname is fine.",
     entryPlaceholder: "e.g. Sam",
     entryEmailLabel: "We'll let you know when a reply arrives (optional)",
     entryEmailPlaceholder: "you@example.com",
-    entryButton: "Start",
+    entryButton: "Start chat",
     inputPlaceholder: "Write your message",
     hintHtml: `<kbd>⌘/Ctrl + Enter</kbd> to send, <kbd>Enter</kbd> for newline`,
     sendButton: "Send",
     introHtml: `
-      <b>Please write what's on your mind in a single message.</b><br>
-      We'll read it carefully and reply.<br>
+      <b>Send everything in one message</b> — we'll read it carefully and reply.<br>
       (It may take a few hours to a day.)
     `,
     emailInvalid: "Please enter a valid email address.",
