@@ -7,6 +7,8 @@ export type ConvData = {
   email: string | null;
   locale: string | null;
   topic: string;
+  lastNotifiedAt?: number | null;
+  pageUrl?: string | null;
 };
 
 export type DiscordConfig = {
@@ -30,6 +32,8 @@ export type ClientHello = {
   locale?: string;
   target?: Target;
   siteId?: string;
+  signedToken?: string;
+  pageUrl?: string;
 };
 export type ClientMessage = { type: "message"; text: string };
 export type ClientSetNickname = { type: "set_nickname"; nickname: string; email?: string | null };
@@ -57,4 +61,18 @@ export function normalizeOrigin(s: string): string {
 
 export function parseOrigins(raw: string): string[] {
   return raw.split(",").map(normalizeOrigin).filter(Boolean);
+}
+
+const PAGE_URL_MAX_LEN = 500;
+export function sanitizePageUrl(raw: string | undefined | null): string | null {
+  if (!raw) return null;
+  try {
+    const u = new URL(raw);
+    if (u.protocol !== "https:" && u.protocol !== "http:") return null;
+    const cleaned = `${u.origin}${u.pathname}`;
+    if (cleaned.length > PAGE_URL_MAX_LEN) return null;
+    return cleaned;
+  } catch {
+    return null;
+  }
 }

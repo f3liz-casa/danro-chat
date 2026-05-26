@@ -105,6 +105,9 @@ export class DiscordAdapter {
   private dgThreadById = new Map<string, string>();
   private dgRegistered = new Set<string>();
   private dgGlobalCleared = false;
+  private dgConnecting = false;
+  private dgAuthFailed = false;
+  private dgBackoffMs = RECONNECT_DELAY_MS;
 
   constructor(
     private env: Env,
@@ -138,9 +141,11 @@ export class DiscordAdapter {
   }
 
   start(): void {
-    if (this.env.DISCORD_BOT_TOKEN && !this.dgWs) {
-      this.dgConnect();
-    }
+    if (!this.env.DISCORD_BOT_TOKEN) return;
+    if (this.dgAuthFailed) return;
+    if (!this.discordConfig) return;
+    if (this.dgWs || this.dgConnecting) return;
+    this.dgConnect();
   }
 
   stop(): void {
@@ -184,12 +189,15 @@ export class DiscordAdapter {
     const res = await this.dgApi(`/channels/${threadId}/messages?limit=${HISTORY_LIMIT}`);
     if (!res.ok) return [];
     const messages = await res.json() as DiscordMessage[];
-    return messages.reverse().map((m) => ({
-      from: (m.webhook_id ? "visitor" : "agent") as "visitor" | "agent",
-      text: m.content,
-      ts: new Date(m.timestamp).getTime(),
-      senderName: discordDisplayName(m),
-    }));
+    return messages
+      .reverse()
+      .filter((m) => !(!m.webhook_id && /^visitor_id:\s*`/.test(m.content)))
+      .map((m) => ({
+        from: (m.webhook_id ? "visitor" : "agent") as "visitor" | "agent",
+        text: m.content,
+        ts: new Date(m.timestamp).getTime(),
+        senderName: discordDisplayName(m),
+      }));
   }
 
   async fetchEmojis(): Promise<Record<string, string>> {
@@ -325,30 +333,53 @@ export class DiscordAdapter {
   }
 
   private dgConnect(): void {
+    if (this.dgConnecting || this.dgWs || this.dgAuthFailed) return;
+    if (!this.env.DISCORD_BOT_TOKEN || !this.discordConfig) return;
+    this.dgConnecting = true;
     fetch(DISCORD_GATEWAY, { headers: { Upgrade: "websocket" } }).then((resp) => {
       const ws = resp.webSocket;
       if (!ws) {
+        this.dgConnecting = false;
         console.error("[discord:gateway] no webSocket");
+        this.dgScheduleReconnect();
         return;
       }
       ws.accept();
       this.dgWs = ws;
+      this.dgConnecting = false;
 
       ws.addEventListener("message", (event) => {
         this.dgOnMessage(ws, event.data as string).catch(console.error);
       });
-      ws.addEventListener("close", () => {
+      ws.addEventListener("close", (e: CloseEvent) => {
         this.dgWs = null;
         if (this.dgHeartbeat) {
           clearInterval(this.dgHeartbeat);
           this.dgHeartbeat = null;
         }
-        if (this.env.DISCORD_BOT_TOKEN) {
-          setTimeout(() => this.dgConnect(), RECONNECT_DELAY_MS);
+        // 4004 auth failed, 4010 invalid shard, 4011 sharding required,
+        // 4012 invalid api version, 4013 invalid intents, 4014 disallowed intents
+        const code = (e as { code?: number }).code ?? 0;
+        if (code === 4004 || code === 4010 || code === 4011 || code === 4012 || code === 4013 || code === 4014) {
+          this.dgAuthFailed = true;
+          console.error(`[discord:gateway] fatal close ${code} — not reconnecting`);
+          return;
         }
+        this.dgScheduleReconnect();
       });
       ws.addEventListener("error", (e) => console.error("[discord:gateway]", e));
-    }).catch((e) => console.error("[discord:gateway:connect]", e));
+    }).catch((e) => {
+      this.dgConnecting = false;
+      console.error("[discord:gateway:connect]", e);
+      this.dgScheduleReconnect();
+    });
+  }
+
+  private dgScheduleReconnect(): void {
+    if (this.dgAuthFailed || !this.discordConfig || !this.env.DISCORD_BOT_TOKEN) return;
+    const delay = Math.min(this.dgBackoffMs, 5 * 60_000);
+    this.dgBackoffMs = Math.min(this.dgBackoffMs * 2, 5 * 60_000);
+    setTimeout(() => this.dgConnect(), delay);
   }
 
   private async dgOnMessage(ws: WebSocket, raw: string): Promise<void> {
@@ -375,6 +406,7 @@ export class DiscordAdapter {
 
     if (p.op === GW_DISPATCH) {
       if (p.t === "READY") {
+        this.dgBackoffMs = RECONNECT_DELAY_MS;
         const d = p.d as { user?: { id: string }; guilds?: Array<{ id: string; unavailable?: boolean }> };
         this.dgBotUserId = d.user?.id ?? null;
         if (!this.dgGlobalCleared && this.dgBotUserId) {

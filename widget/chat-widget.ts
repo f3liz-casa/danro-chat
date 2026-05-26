@@ -34,6 +34,8 @@ type Strings = {
   statusDisconnected: string;
   statusError: (reason: string) => string;
   attrMissing: string;
+  openLabel: string;
+  minimizeLabel: string;
 };
 
 const STRINGS: Record<Locale, Strings> = {
@@ -61,6 +63,8 @@ const STRINGS: Record<Locale, Strings> = {
     statusDisconnected: "つながりが切れました",
     statusError: (reason) => `エラー: ${reason}`,
     attrMissing: "ws-url 属性が必要です",
+    openLabel: "相談をひらく",
+    minimizeLabel: "最小化",
   },
   ko: {
     headerTitle: "상담",
@@ -86,6 +90,8 @@ const STRINGS: Record<Locale, Strings> = {
     statusDisconnected: "연결이 끊어졌어요",
     statusError: (reason) => `문제가 생겼어요: ${reason}`,
     attrMissing: "ws-url 속성이 필요해요",
+    openLabel: "상담 열기",
+    minimizeLabel: "최소화",
   },
 };
 
@@ -110,21 +116,45 @@ const css = `
     --visitor: #e9efe6;
     --agent: #ffffff;
     --border: #e6e3dc;
-    display: block;
+    position: fixed;
+    right: 16px;
+    bottom: 16px;
+    z-index: 2147483000;
     font-family: -apple-system, BlinkMacSystemFont, "Hiragino Sans", "Noto Sans JP", sans-serif;
     font-size: 13px;
     color: var(--fg);
   }
+  .wrap { display: contents; }
+  .launcher {
+    width: 56px;
+    height: 56px;
+    border-radius: 28px;
+    border: 1px solid var(--border);
+    background: var(--bg);
+    color: var(--accent);
+    cursor: pointer;
+    display: grid;
+    place-items: center;
+    box-shadow: 0 6px 20px rgba(0,0,0,0.12);
+    padding: 0;
+    transition: transform 0.15s ease;
+  }
+  .launcher:hover { transform: translateY(-1px); }
+  .launcher svg { width: 26px; height: 26px; }
+  .wrap.open .launcher { display: none; }
+  .wrap:not(.open) .panel { display: none; }
   .panel:lang(ko) { word-break: keep-all; line-break: strict; }
   .panel {
     display: flex;
     flex-direction: column;
     width: 320px;
     height: 510px;
+    max-height: calc(100dvh - 32px);
     background: var(--bg);
     border: 1px solid var(--border);
     border-radius: 14px;
     overflow: hidden;
+    box-shadow: 0 12px 32px rgba(0,0,0,0.14);
   }
   header {
     padding: 10px 14px;
@@ -133,9 +163,25 @@ const css = `
     color: var(--muted);
     display: flex;
     justify-content: space-between;
-    align-items: baseline;
+    align-items: center;
+    gap: 8px;
   }
   header strong { color: var(--fg); font-weight: 500; }
+  header .title { display: flex; gap: 8px; align-items: baseline; min-width: 0; flex: 1; }
+  header .title .who { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .min-btn {
+    border: none;
+    background: transparent;
+    color: var(--muted);
+    cursor: pointer;
+    padding: 4px;
+    border-radius: 6px;
+    display: grid;
+    place-items: center;
+    min-width: 0;
+  }
+  .min-btn:hover { background: rgba(0,0,0,0.05); color: var(--fg); }
+  .min-btn svg { width: 16px; height: 16px; display: block; }
   .who { color: var(--accent); }
   .log {
     flex: 1;
@@ -260,7 +306,7 @@ const css = `
   .grow-wrap > textarea, .grow-wrap::after {
     grid-area: 1 / 1 / 2 / 2;
   }
-  button {
+  form button {
     border: none;
     background: var(--accent);
     color: white;
@@ -272,7 +318,7 @@ const css = `
     align-self: stretch;
     min-width: 48px;
   }
-  button:disabled { opacity: 0.4; cursor: default; }
+  form button:disabled { opacity: 0.4; cursor: default; }
   .hint {
     font-size: 11px;
     color: var(--muted);
@@ -296,6 +342,10 @@ class DanroTalk extends HTMLElement {
   private strings: Strings = STRINGS.ja;
   private storageKey: string = STORAGE_KEY_BASE;
   private panel!: HTMLDivElement;
+  private wrap!: HTMLDivElement;
+  private launcher!: HTMLButtonElement;
+  private minBtn!: HTMLButtonElement;
+  private openStorageKey: string = `${STORAGE_KEY_BASE}:open`;
   private entryInput!: HTMLInputElement;
   private entryEmail!: HTMLInputElement;
   private entryButton!: HTMLButtonElement;
@@ -311,6 +361,7 @@ class DanroTalk extends HTMLElement {
     const siteId = this.getAttribute("site-id");
     const target = this.getAttribute("target") ?? "zulip";
     this.storageKey = `${STORAGE_KEY_BASE}:${siteId ?? target}`;
+    this.openStorageKey = `${this.storageKey}:open`;
     const explicitUrl = this.getAttribute("ws-url");
     let url: string;
     if (explicitUrl) {
@@ -336,8 +387,21 @@ class DanroTalk extends HTMLElement {
     const s = this.strings;
     root.innerHTML = `
       <style>${css}</style>
+      <div class="wrap" id="wrap-root">
+      <button class="launcher" id="launcher" type="button" aria-label="${s.openLabel}" title="${s.openLabel}">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+          <path d="M21 12a8 8 0 0 1-11.6 7.2L4 20l1-4.4A8 8 0 1 1 21 12z"/>
+        </svg>
+      </button>
       <div class="panel" id="panel" lang="${this.locale}">
-        <header><strong>${s.headerTitle}</strong><span class="who" id="who"></span></header>
+        <header>
+          <span class="title"><strong>${s.headerTitle}</strong><span class="who" id="who"></span></span>
+          <button class="min-btn" id="min" type="button" aria-label="${s.minimizeLabel}" title="${s.minimizeLabel}">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true">
+              <line x1="6" y1="14" x2="18" y2="14"/>
+            </svg>
+          </button>
+        </header>
         <div class="entry" id="entry">
           <h2>${s.entryTitle}</h2>
           <p>${s.entryQ}<br>${s.entryHelp}</p>
@@ -357,6 +421,7 @@ class DanroTalk extends HTMLElement {
           <div class="hint">${s.hintHtml}</div>
         </form>
       </div>
+      </div>
     `;
     this.log = root.getElementById("log") as HTMLDivElement;
     this.input = root.getElementById("input") as HTMLTextAreaElement;
@@ -367,6 +432,13 @@ class DanroTalk extends HTMLElement {
     this.entryInput = root.getElementById("entry-input") as HTMLInputElement;
     this.entryEmail = root.getElementById("entry-email") as HTMLInputElement;
     this.entryButton = root.getElementById("entry-button") as HTMLButtonElement;
+    this.wrap = root.getElementById("wrap-root") as HTMLDivElement;
+    this.launcher = root.getElementById("launcher") as HTMLButtonElement;
+    this.minBtn = root.getElementById("min") as HTMLButtonElement;
+    const startOpen = localStorage.getItem(this.openStorageKey) === "1";
+    this.setOpen(startOpen);
+    this.launcher.addEventListener("click", () => this.setOpen(true));
+    this.minBtn.addEventListener("click", () => this.setOpen(false));
 
     const tryEntrySubmit = (e: Event): void => {
       e.preventDefault();
@@ -417,6 +489,16 @@ class DanroTalk extends HTMLElement {
     });
   }
 
+  private setOpen(open: boolean): void {
+    this.wrap.classList.toggle("open", open);
+    localStorage.setItem(this.openStorageKey, open ? "1" : "0");
+    if (open && !this.panel.classList.contains("entering") && !this.input.disabled) {
+      requestAnimationFrame(() => this.input.focus());
+    } else if (open && this.panel.classList.contains("entering")) {
+      requestAnimationFrame(() => this.entryInput.focus());
+    }
+  }
+
   private enterChat(hasHistory: boolean): void {
     this.panel.classList.remove("entering");
     this.input.disabled = false;
@@ -459,6 +541,22 @@ class DanroTalk extends HTMLElement {
     this.inputWrap.dataset.replicatedValue = "";
   }
 
+  private readSignedToken(): string | null {
+    try {
+      const params = new URLSearchParams(location.search);
+      const t = params.get("dt");
+      if (!t) return null;
+      params.delete("dt");
+      const qs = params.toString();
+      const clean = location.pathname + (qs ? `?${qs}` : "") + location.hash;
+      history.replaceState(null, "", clean);
+      this.setOpen(true);
+      return t;
+    } catch {
+      return null;
+    }
+  }
+
   private connect(url: string): void {
     const ws = new WebSocket(url);
     this.ws = ws;
@@ -466,12 +564,16 @@ class DanroTalk extends HTMLElement {
       const stored = localStorage.getItem(this.storageKey);
       const target = this.getAttribute("target");
       const siteId = this.getAttribute("site-id");
+      const signedToken = this.readSignedToken();
+      const pageUrl = location.origin + location.pathname;
       ws.send(JSON.stringify({
         type: "hello",
         locale: this.locale,
+        pageUrl,
         ...(target ? { target } : {}),
         ...(siteId ? { siteId } : {}),
         ...(stored ? { visitorId: stored } : {}),
+        ...(signedToken ? { signedToken } : {}),
       }));
     });
     ws.addEventListener("message", (e) => {

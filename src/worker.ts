@@ -12,12 +12,17 @@ export interface Env {
   ZULIP_SITE_ID?: string;
   ZULIP_ORIGINS?: string;
   DISCORD_BOT_TOKEN?: string;
+  RESEND_API_KEY?: string;
+  RESEND_FROM?: string;
+  NOTIFY_URL?: string;
+  LINK_SIGNING_KEY?: string;
 }
 
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
     const url = new URL(request.url);
-    if (url.pathname === "/" && request.method === "GET") {
+    const isWsUpgrade = request.headers.get("Upgrade") === "websocket";
+    if (url.pathname === "/" && request.method === "GET" && !isWsUpgrade) {
       return new Response(
         `<!doctype html><meta charset="utf-8"><title>danro-talk</title>` +
         `<style>body{margin:0;display:grid;place-items:center;min-height:100dvh;` +

@@ -128,12 +128,17 @@ export class ZulipAdapter {
       }>;
     };
     if (data.result !== "success") return [];
-    return data.messages.map((m) => ({
-      from: m.sender_email === this.env.ZULIP_USERNAME ? ("visitor" as const) : ("agent" as const),
-      text: m.sender_email === this.env.ZULIP_USERNAME ? stripVisitorPrefix(m.content) : m.content,
-      ts: m.timestamp * 1000,
-      senderName: m.sender_full_name,
-    }));
+    return data.messages
+      .filter((m) => {
+        if (m.sender_email !== this.env.ZULIP_USERNAME) return true;
+        return VISITOR_PREFIX_RE.test(m.content);
+      })
+      .map((m) => ({
+        from: m.sender_email === this.env.ZULIP_USERNAME ? ("visitor" as const) : ("agent" as const),
+        text: m.sender_email === this.env.ZULIP_USERNAME ? stripVisitorPrefix(m.content) : m.content,
+        ts: m.timestamp * 1000,
+        senderName: m.sender_full_name,
+      }));
   }
 
   async fetchEmojis(): Promise<Record<string, string>> {
@@ -176,6 +181,10 @@ export class ZulipAdapter {
     this.lastEventId = data.last_event_id;
     await this.storage.put("zulip:queue_id", this.queueId);
     await this.storage.put("zulip:last_event_id", this.lastEventId);
+  }
+
+  async pollOnce(): Promise<void> {
+    return this.poll();
   }
 
   private async poll(): Promise<void> {

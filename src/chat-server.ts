@@ -1,9 +1,11 @@
 import { nanoid } from "nanoid";
 import type { Env } from "./worker.js";
 import type { Target, ConvData, ClientFrame, ServerFrame, HistoryMessage } from "./types.js";
-import { normalizeOrigin, parseOrigins } from "./types.js";
+import { normalizeOrigin, parseOrigins, sanitizePageUrl } from "./types.js";
 import { ZulipAdapter } from "./zulip.js";
 import { DiscordAdapter } from "./discord.js";
+import { sendNotification, shouldNotify } from "./notify.js";
+import { verifyToken } from "./signed-link.js";
 import type { InteractionData } from "./discord.js";
 
 const NICKNAME_MAX_LEN = 40;
@@ -60,8 +62,30 @@ export class ChatServer implements DurableObject {
 
   private deliverMessage(target: Target, topic: string, senderName: string, text: string): void {
     const vid = this.topicIdx.get(`${target}:${topic}`);
-    const ws = vid ? this.sessions.get(vid) : undefined;
+    if (!vid) return;
+    const ws = this.sessions.get(vid);
+    const online = !!ws && ws.readyState === 1;
     if (ws) this.wsSend(ws, { type: "message", from: "agent", text, ts: Date.now(), senderName });
+    if (!online) this.maybeNotify(vid, senderName, text);
+  }
+
+  private maybeNotify(vid: string, senderName: string, text: string): void {
+    const conv = this.convs.get(vid);
+    console.log(`[notify:check] vid=${vid} email=${conv?.email ? "set" : "none"} lastNotifiedAt=${conv?.lastNotifiedAt ?? "null"} pageUrl=${conv?.pageUrl ?? "null"}`);
+    if (!conv?.email) return;
+    const now = Date.now();
+    if (!shouldNotify(conv.lastNotifiedAt, now)) {
+      console.log(`[notify:skip] cooldown vid=${vid}`);
+      return;
+    }
+    conv.lastNotifiedAt = now;
+    console.log(`[notify:send] vid=${vid} to=${conv.email}`);
+    this.ctx.storage.put(`conv:${vid}`, conv).catch(() => {});
+    this.ctx.waitUntil(
+      sendNotification(this.env, conv.email, conv.locale, senderName, text, vid, conv.pageUrl ?? null).catch((e) =>
+        console.error("[notify]", e),
+      ),
+    );
   }
 
   private closeSessions(target: Target): void {
@@ -153,8 +177,18 @@ export class ChatServer implements DurableObject {
         return;
       }
 
-      const { conv, returning } = this.attach(frame.visitorId ?? null, ws, target, frame.locale);
+      let attachId: string | null = frame.visitorId ?? null;
+      if (frame.signedToken && this.env.LINK_SIGNING_KEY) {
+        const verified = await verifyToken(this.env.LINK_SIGNING_KEY, frame.signedToken).catch(() => null);
+        if (verified) attachId = verified;
+      }
+      const { conv, returning } = this.attach(attachId, ws, target, frame.locale);
       setVid(conv.visitorId);
+      const pageUrl = sanitizePageUrl(frame.pageUrl);
+      if (pageUrl && conv.pageUrl !== pageUrl) {
+        conv.pageUrl = pageUrl;
+        this.ctx.storage.put(`conv:${conv.visitorId}`, conv).catch(() => {});
+      }
       const hasHistory = returning && !!conv.topic;
       const emojis = await this.fetchEmojis(target).catch(() => ({} as Record<string, string>));
 
@@ -305,6 +339,7 @@ export class ChatServer implements DurableObject {
 
   async alarm(): Promise<void> {
     this.startServices();
+    await this.zulip.pollOnce().catch((e) => console.error("[alarm:zulip]", e));
     await this.ctx.storage.setAlarm(Date.now() + ALARM_INTERVAL_MS);
   }
 
